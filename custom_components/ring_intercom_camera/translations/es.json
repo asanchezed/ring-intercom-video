@@ -16,5 +16,21 @@
       "title": "La configuración YAML de Ring Intercom Video Camera está obsoleta",
       "description": "Configurar Ring Intercom Video Camera mediante `configuration.yaml` está obsoleto y se ha importado automáticamente a la interfaz. Elimina la entrada `ring_intercom_camera:` de tu `configuration.yaml` para resolver este aviso."
     }
+  },
+  "services": {
+    "record": {
+      "name": "Grabar clip",
+      "description": "Graba un clip de vídeo de la cámara del intercom mediante una sesión WebRTC en el servidor y lo guarda como archivo MP4. Úsalo en lugar de camera.record, que requiere un stream RTSP/HLS que esta cámara no tiene.",
+      "fields": {
+        "filename": {
+          "name": "Archivo",
+          "description": "Ruta completa del archivo MP4 de salida. Debe estar en una ruta permitida (p. ej. dentro de /media)."
+        },
+        "duration": {
+          "name": "Duración",
+          "description": "Duración de la grabación en segundos."
+        }
+      }
+    }
   }
 }

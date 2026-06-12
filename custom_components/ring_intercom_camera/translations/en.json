@@ -16,5 +16,21 @@
       "title": "Ring Intercom Video Camera YAML configuration is deprecated",
       "description": "Configuring Ring Intercom Video Camera via `configuration.yaml` is deprecated and has been automatically imported into the UI. Remove the `ring_intercom_camera:` entry from your `configuration.yaml` to fix this issue."
     }
+  },
+  "services": {
+    "record": {
+      "name": "Record clip",
+      "description": "Records a video clip from the intercom camera through a server-side WebRTC session and saves it as an MP4 file. Use this instead of camera.record, which requires an RTSP/HLS stream this camera doesn't have.",
+      "fields": {
+        "filename": {
+          "name": "Filename",
+          "description": "Full path of the output MP4 file. Must be inside an allowed path (e.g. under /media)."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Length of the recording in seconds."
+        }
+      }
+    }
   }
 }

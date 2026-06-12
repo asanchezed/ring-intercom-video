@@ -169,6 +169,31 @@ This component:
 
 ---
 
+## 🎬 Services
+
+### `ring_intercom_camera.record`
+
+Records a video clip server-side (no browser needed) and saves it as an MP4 file. The standard `camera.record` service **does not work** with this camera — it requires an RTSP/HLS `stream_source`, and this camera is WebRTC-only. This service opens the same server-side WebRTC session used for snapshots and writes the video track to disk with `aiortc`'s `MediaRecorder`.
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `entity_id` (target) | ✅ | — | The intercom camera entity |
+| `filename` | ✅ | — | Full path of the output MP4. Must be in an allowed path (e.g. under `/media`) |
+| `duration` | ❌ | `20` | Clip length in seconds (1–300) |
+
+```yaml
+# Example: record 20 s when someone rings
+- action: ring_intercom_camera.record
+  data:
+    entity_id: camera.portal_camera
+    filename: '/media/local/cameras/portal/video-{{ now().strftime("%Y%m%d-%H%M%S") }}.mp4'
+    duration: 20
+```
+
+> 💡 Like the live view, the analog camera only outputs video while activated (ding or handset camera button) — trigger the recording on `binary_sensor.<intercom>_ding` for best results. If no video arrives, the service raises an error and no file is left behind.
+
+---
+
 ## 🔧 Troubleshooting
 
 **❓ No camera entity appears after restart**
