@@ -56,7 +56,11 @@ SNAPSHOT_MAX_FRAMES = 75         # Max frames to examine (~3s at 25fps)
 SNAPSHOT_BRIGHTNESS_THRESHOLD = 25  # Min brightness to consider "real" video
 SNAPSHOT_STABILIZE_FRAMES = 5    # Consecutive bright frames before capture
 SNAPSHOT_CACHE_SECONDS = 10      # Don't re-capture within this window
-SNAPSHOT_SESSION_MAX_SECONDS = 20  # Max wall time for a snapshot session
+# HA's camera.snapshot service gives async_camera_image() 10 s total
+# (CAMERA_IMAGE_TIMEOUT in homeassistant.components.camera), so the whole
+# session — ticket + signaling + frames — must finish inside that budget.
+SNAPSHOT_SESSION_MAX_SECONDS = 8
+SNAPSHOT_FRAME_TIMEOUT = 5       # Max wait for a single frame
 
 # Server-side clip recording settings
 RECORD_DEFAULT_DURATION = 20     # Default clip length (seconds)
@@ -210,7 +214,9 @@ class RingIntercomCamera(Camera):
             return None
 
         pc = RTCPeerConnection()
-        snapshot_data: dict[str, bytes | None] = {"image": None}
+        # "frame" holds the best PIL image seen so far, published incrementally
+        # so a session/HA timeout still returns the best frame instead of None
+        snapshot_data: dict[str, Any] = {"frame": None}
         capture_done = asyncio.Event()
 
         @pc.on("track")
@@ -219,14 +225,15 @@ class RingIntercomCamera(Camera):
                 return
 
             frame_count = 0
-            best_frame = None
             best_brightness = 0.0
             bright_streak = 0
             prev_brightness = 0.0
 
             try:
                 while frame_count < SNAPSHOT_MAX_FRAMES:
-                    frame = await asyncio.wait_for(track.recv(), timeout=10)
+                    frame = await asyncio.wait_for(
+                        track.recv(), timeout=SNAPSHOT_FRAME_TIMEOUT
+                    )
                     frame_count += 1
 
                     img = frame.to_image()
@@ -242,7 +249,7 @@ class RingIntercomCamera(Camera):
 
                     if brightness > best_brightness:
                         best_brightness = brightness
-                        best_frame = img
+                        snapshot_data["frame"] = img
 
                     # Wait for stabilized frame
                     if brightness > SNAPSHOT_BRIGHTNESS_THRESHOLD:
@@ -253,7 +260,7 @@ class RingIntercomCamera(Camera):
                             and abs(brightness - prev_brightness)
                             < brightness * 0.15
                         ):
-                            best_frame = img
+                            snapshot_data["frame"] = img
                             break
                     else:
                         bright_streak = 0
@@ -265,17 +272,17 @@ class RingIntercomCamera(Camera):
             except Exception as exc:
                 _LOGGER.debug("Frame capture error: %s", exc)
 
-            if best_frame:
-                buf = BytesIO()
-                best_frame.save(buf, "JPEG", quality=85)
-                snapshot_data["image"] = buf.getvalue()
-
             capture_done.set()
 
         await self._run_webrtc_session(
             pc, done=capture_done, max_seconds=SNAPSHOT_SESSION_MAX_SECONDS
         )
-        return snapshot_data["image"]
+
+        if (frame := snapshot_data["frame"]) is not None:
+            buf = BytesIO()
+            frame.save(buf, "JPEG", quality=85)
+            return buf.getvalue()
+        return None
 
     async def _run_webrtc_session(
         self, pc, *, done: asyncio.Event, max_seconds: float
