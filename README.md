@@ -116,15 +116,15 @@ When the camera is not active, the stream shows a **black image**. This is norma
 
 ## ⚙️ Configuration
 
-Add to your `configuration.yaml`:
+Everything is done from the UI — no YAML needed:
 
-```yaml
-ring_intercom_camera:
-```
+1. Go to **Settings → Devices & Services**
+2. Click **➕ Add Integration** and search for *"Ring Intercom Video Camera"*
+3. Confirm the dialog — no credentials are asked, the integration reuses the official Ring integration's auth
 
-Restart Home Assistant. The component will **auto‑discover** `intercom_handset_video` devices from your existing Ring integration.
+The component will **auto‑discover** `intercom_handset_video` devices from your existing Ring integration, and a new camera entity will appear: `camera.<device_name>_camera` 🎉
 
-A new camera entity will appear: `camera.<device_name>_camera` 🎉
+> 🔄 **Upgrading from YAML?** Existing `ring_intercom_camera:` entries in `configuration.yaml` are **imported automatically** into a UI config entry on the next restart. A repair issue will remind you to remove the now-obsolete YAML line.
 
 ---
 

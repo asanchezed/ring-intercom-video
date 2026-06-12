@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Ring Intercom Video Camera",
+        "description": "Adds a WebRTC camera entity for every Ring Intercom Video device discovered through the official Ring integration. No credentials are needed — authentication is reused from the Ring integration. Submit to finish setup."
+      }
+    },
+    "abort": {
+      "already_configured": "Already configured. Only a single instance is needed.",
+      "ring_not_configured": "The official Ring integration must be set up before adding this integration."
+    }
+  },
+  "issues": {
+    "deprecated_yaml": {
+      "title": "Ring Intercom Video Camera YAML configuration is deprecated",
+      "description": "Configuring Ring Intercom Video Camera via `configuration.yaml` is deprecated and has been automatically imported into the UI. Remove the `ring_intercom_camera:` entry from your `configuration.yaml` to fix this issue."
+    }
+  }
+}

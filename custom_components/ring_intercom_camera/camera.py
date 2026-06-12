@@ -30,11 +30,13 @@ from homeassistant.components.camera import (
     WebRTCError,
     WebRTCSendMessage,
 )
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 _LOGGER = logging.getLogger(__name__)
+
+RING_DOMAIN = "ring"
 
 # Server-side snapshot capture settings
 SNAPSHOT_MAX_FRAMES = 75         # Max frames to examine (~3s at 25fps)
@@ -43,21 +45,22 @@ SNAPSHOT_STABILIZE_FRAMES = 5    # Consecutive bright frames before capture
 SNAPSHOT_CACHE_SECONDS = 10      # Don't re-capture within this window
 
 
-async def async_setup_platform(
+async def async_setup_entry(
     hass: HomeAssistant,
-    config: ConfigType,
+    entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
-    discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    """Set up Ring Intercom camera entities."""
-    ring_entries = hass.config_entries.async_entries("ring")
+    """Set up Ring Intercom camera entities from a config entry."""
+    ring_entries = hass.config_entries.async_entries(RING_DOMAIN)
     if not ring_entries:
         _LOGGER.warning("Ring integration not configured")
         return
 
     entities = []
-    for entry in ring_entries:
-        ring_data = getattr(entry, "runtime_data", None)
+    for ring_entry in ring_entries:
+        if ring_entry.state is not ConfigEntryState.LOADED:
+            continue
+        ring_data = getattr(ring_entry, "runtime_data", None)
         if ring_data is None:
             continue
 

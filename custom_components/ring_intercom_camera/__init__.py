@@ -15,14 +15,25 @@ from __future__ import annotations
 
 import logging
 
+from homeassistant.config_entries import (
+    SOURCE_IMPORT,
+    ConfigEntry,
+    ConfigEntryState,
+)
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import discovery
+from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv, issue_registry as ir
+from homeassistant.helpers.typing import ConfigType
+
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-DOMAIN = "ring_intercom_camera"
 PLATFORMS = [Platform.CAMERA]
+RING_DOMAIN = "ring"
+
+CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
 
 
 def _patch_ring_other() -> None:
@@ -86,13 +97,40 @@ def _patch_ring_other() -> None:
     _LOGGER.info("Patched RingOther with WebRTC stream methods")
 
 
-async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up the Ring Intercom Camera component from configuration.yaml."""
-    hass.data.setdefault(DOMAIN, {})
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Handle legacy YAML configuration by importing it as a config entry."""
+    if DOMAIN in config:
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            "deprecated_yaml",
+            is_fixable=False,
+            issue_domain=DOMAIN,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="deprecated_yaml",
+        )
+        hass.async_create_task(
+            hass.config_entries.flow.async_init(
+                DOMAIN, context={"source": SOURCE_IMPORT}, data={}
+            )
+        )
+    return True
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up Ring Intercom Video Camera from a config entry."""
+    ring_entries = hass.config_entries.async_entries(RING_DOMAIN)
+    if not ring_entries:
+        raise ConfigEntryNotReady("The Ring integration is not configured")
+    if not any(e.state is ConfigEntryState.LOADED for e in ring_entries):
+        raise ConfigEntryNotReady("The Ring integration has not finished loading")
 
     _patch_ring_other()
 
-    hass.async_create_task(
-        discovery.async_load_platform(hass, Platform.CAMERA, DOMAIN, {}, config)
-    )
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
