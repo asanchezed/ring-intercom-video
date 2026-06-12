@@ -174,6 +174,12 @@ class RingIntercomCamera(Camera):
         Returns cached image if recent, otherwise starts a new
         WebRTC session with aiortc to grab a stabilized frame.
         """
+        # While recording, the cache is refreshed live from the recording's
+        # own video track (_feed_snapshot_cache) — opening a second WebRTC
+        # session would conflict with the device's single live-view session.
+        if self._recording:
+            return self._last_image
+
         # Return cache if fresh
         if (
             self._last_image
@@ -216,16 +222,18 @@ class RingIntercomCamera(Camera):
         pc = RTCPeerConnection()
         # "frame" holds the best PIL image seen so far, published incrementally
         # so a session/HA timeout still returns the best frame instead of None
-        snapshot_data: dict[str, Any] = {"frame": None}
+        snapshot_data: dict[str, Any] = {"frame": None, "frames": 0, "track": False}
         capture_done = asyncio.Event()
 
         @pc.on("track")
         async def on_track(track):
             if track.kind != "video":
                 return
+            snapshot_data["track"] = True
+            _LOGGER.debug("Video track received for %s", self._device.name)
 
             frame_count = 0
-            best_brightness = 0.0
+            best_brightness = -1.0  # keep the first frame even if pure black
             bright_streak = 0
             prev_brightness = 0.0
 
@@ -235,6 +243,7 @@ class RingIntercomCamera(Camera):
                         track.recv(), timeout=SNAPSHOT_FRAME_TIMEOUT
                     )
                     frame_count += 1
+                    snapshot_data["frames"] = frame_count
 
                     img = frame.to_image()
                     w, h = img.size
@@ -282,7 +291,46 @@ class RingIntercomCamera(Camera):
             buf = BytesIO()
             frame.save(buf, "JPEG", quality=85)
             return buf.getvalue()
+
+        if not snapshot_data["track"]:
+            _LOGGER.warning(
+                "Snapshot failed for %s: WebRTC session ended without a video "
+                "track — signaling did not complete within %d s or the HA host "
+                "could not establish the media connection (outbound UDP)",
+                self._device.name, SNAPSHOT_SESSION_MAX_SECONDS,
+            )
+        else:
+            _LOGGER.warning(
+                "Snapshot failed for %s: video track opened but no frame was "
+                "decoded (%d frames received)",
+                self._device.name, snapshot_data["frames"],
+            )
         return None
+
+    async def _feed_snapshot_cache(self, track) -> None:
+        """Refresh the snapshot cache (~1 fps) from a live video track.
+
+        Runs while a recording is active so async_camera_image() can serve
+        fresh frames without opening a second WebRTC session to the device.
+        Exits when the track ends or the task is cancelled.
+        """
+        last_encode = 0.0
+        try:
+            while True:
+                frame = await track.recv()
+                now = time.time()
+                if now - last_encode < 1.0:
+                    continue
+                last_encode = now
+                img = frame.to_image()
+                buf = BytesIO()
+                img.save(buf, "JPEG", quality=85)
+                self._last_image = buf.getvalue()
+                self._last_image_time = now
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.debug("Snapshot cache feed ended", exc_info=True)
 
     async def _run_webrtc_session(
         self, pc, *, done: asyncio.Event, max_seconds: float
@@ -315,9 +363,10 @@ class RingIntercomCamera(Camera):
             )
             ticket = resp.json()["ticket"]
         except Exception:
-            _LOGGER.debug("Failed to get WebRTC ticket", exc_info=True)
+            _LOGGER.warning("Failed to get WebRTC signaling ticket", exc_info=True)
             await pc.close()
             return
+        _LOGGER.debug("Got WebRTC signaling ticket")
 
         # 2. Setup peer connection offer
         pc.addTransceiver("video", direction="recvonly")
@@ -352,6 +401,7 @@ class RingIntercomCamera(Camera):
                     },
                 }))
 
+                _LOGGER.debug("Signaling websocket connected")
                 start = time.time()
                 while time.time() - start < max_seconds and not done.is_set():
                     try:
@@ -363,6 +413,7 @@ class RingIntercomCamera(Camera):
                         if method == "sdp":
                             sdp = body.get("sdp", "")
                             if sdp:
+                                _LOGGER.debug("Received SDP answer")
                                 await pc.setRemoteDescription(
                                     RTCSessionDescription(
                                         sdp=sdp, type="answer"
@@ -370,10 +421,12 @@ class RingIntercomCamera(Camera):
                                 )
                         elif method == "session_created":
                             session_id = body.get("session_id")
+                            _LOGGER.debug("Signaling session created")
                         elif (
                             method == "notification"
                             and body.get("text") == "camera_connected"
                         ):
+                            _LOGGER.debug("Camera connected, activating session")
                             if session_id:
                                 await ws.send(json.dumps({
                                     "method": "activate_session",
@@ -389,6 +442,11 @@ class RingIntercomCamera(Camera):
                         if done.is_set():
                             break
 
+                _LOGGER.debug(
+                    "Signaling loop ended after %.1f s (done=%s)",
+                    time.time() - start, done.is_set(),
+                )
+
                 # Clean close
                 try:
                     await ws.send(json.dumps({
@@ -403,7 +461,7 @@ class RingIntercomCamera(Camera):
                     pass
 
         except Exception:
-            _LOGGER.debug("WebRTC signaling error", exc_info=True)
+            _LOGGER.warning("WebRTC signaling error", exc_info=True)
         finally:
             await pc.close()
 
@@ -421,7 +479,7 @@ class RingIntercomCamera(Camera):
 
         try:
             from aiortc import RTCPeerConnection
-            from aiortc.contrib.media import MediaRecorder
+            from aiortc.contrib.media import MediaRecorder, MediaRelay
         except ImportError as err:
             raise HomeAssistantError(
                 "aiortc not available — recording requires aiortc. "
@@ -435,16 +493,24 @@ class RingIntercomCamera(Camera):
         pc = RTCPeerConnection()
         # MediaRecorder opens the output container on creation (blocking I/O)
         recorder = await self.hass.async_add_executor_job(MediaRecorder, filename)
+        # Relay duplicates the single video track so the recorder and the
+        # snapshot cache can consume frames concurrently without stealing
+        # them from each other
+        relay = MediaRelay()
         record_done = asyncio.Event()
         recording = {"started": False}
+        cache_feed: dict[str, asyncio.Task | None] = {"task": None}
 
         @pc.on("track")
         async def on_track(track):
             if track.kind != "video" or recording["started"]:
                 return
             recording["started"] = True
-            recorder.addTrack(track)
+            recorder.addTrack(relay.subscribe(track))
             await recorder.start()
+            cache_feed["task"] = asyncio.create_task(
+                self._feed_snapshot_cache(relay.subscribe(track))
+            )
             _LOGGER.debug(
                 "Recording %s for %d s to %s",
                 self.entity_id, duration, filename,
@@ -460,6 +526,8 @@ class RingIntercomCamera(Camera):
         finally:
             self._recording = False
             self.async_write_ha_state()
+            if task := cache_feed["task"]:
+                task.cancel()
             try:
                 await recorder.stop()
             except Exception:
