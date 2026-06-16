@@ -57,9 +57,13 @@ SNAPSHOT_BRIGHTNESS_THRESHOLD = 25  # Min brightness to consider "real" video
 SNAPSHOT_STABILIZE_FRAMES = 5    # Consecutive bright frames before capture
 SNAPSHOT_CACHE_SECONDS = 10      # Don't re-capture within this window
 # HA's camera.snapshot service gives async_camera_image() 10 s total
-# (CAMERA_IMAGE_TIMEOUT in homeassistant.components.camera), so the whole
-# session — ticket + signaling + frames — must finish inside that budget.
-SNAPSHOT_SESSION_MAX_SECONDS = 8
+# (CAMERA_IMAGE_TIMEOUT in homeassistant.components.camera). This bounds the
+# WHOLE server-side session — ticket fetch + websocket handshake + signaling +
+# frames — measured from the very start of _run_webrtc_session, leaving headroom
+# under 10 s for the bounded ws.recv() tail and the bounded pc.close() teardown.
+SNAPSHOT_SESSION_MAX_SECONDS = 7
+SNAPSHOT_RECV_TIMEOUT = 1        # Snapshot: poll signaling often, short recv tail
+SNAPSHOT_CLOSE_TIMEOUT = 1.5     # Max wait for pc.close() teardown
 SNAPSHOT_FRAME_TIMEOUT = 5       # Max wait for a single frame
 
 # Server-side clip recording settings
@@ -177,7 +181,17 @@ class RingIntercomCamera(Camera):
         # While recording, the cache is refreshed live from the recording's
         # own video track (_feed_snapshot_cache) — opening a second WebRTC
         # session would conflict with the device's single live-view session.
+        # At the very start of a recording the cache is still cold (or holds a
+        # stale frame from a previous session) because no frame has been
+        # decoded yet, so wait for a fresh frame instead of returning None.
         if self._recording:
+            deadline = time.time() + SNAPSHOT_SESSION_MAX_SECONDS
+            while (
+                self._recording
+                and (time.time() - self._last_image_time) >= SNAPSHOT_CACHE_SECONDS
+                and time.time() < deadline
+            ):
+                await asyncio.sleep(0.25)
             return self._last_image
 
         # Return cache if fresh
@@ -284,7 +298,10 @@ class RingIntercomCamera(Camera):
             capture_done.set()
 
         await self._run_webrtc_session(
-            pc, done=capture_done, max_seconds=SNAPSHOT_SESSION_MAX_SECONDS
+            pc,
+            done=capture_done,
+            max_seconds=SNAPSHOT_SESSION_MAX_SECONDS,
+            recv_timeout=SNAPSHOT_RECV_TIMEOUT,
         )
 
         if (frame := snapshot_data["frame"]) is not None:
@@ -333,14 +350,26 @@ class RingIntercomCamera(Camera):
             _LOGGER.debug("Snapshot cache feed ended", exc_info=True)
 
     async def _run_webrtc_session(
-        self, pc, *, done: asyncio.Event, max_seconds: float
+        self,
+        pc,
+        *,
+        done: asyncio.Event,
+        max_seconds: float,
+        recv_timeout: float = 3,
     ) -> None:
         """Drive a server-side WebRTC session over Ring signaling.
 
         Track handlers must be registered on ``pc`` before calling.
         Runs until ``done`` is set, the remote closes, or ``max_seconds``
         elapses; always closes the peer connection on the way out.
+
+        ``max_seconds`` bounds the WHOLE session, measured from entry (so the
+        ticket fetch and websocket handshake count against it), not just the
+        signaling loop. ``recv_timeout`` caps each ``ws.recv()`` so the loop's
+        tail past ``max_seconds`` stays small — the snapshot path needs this to
+        finish inside HA's 10 s CAMERA_IMAGE_TIMEOUT; recording keeps the default.
         """
+        session_start = time.time()
         from aiortc import RTCSessionDescription
         from ring_doorbell.const import (
             APP_API_URI,
@@ -402,10 +431,9 @@ class RingIntercomCamera(Camera):
                 }))
 
                 _LOGGER.debug("Signaling websocket connected")
-                start = time.time()
-                while time.time() - start < max_seconds and not done.is_set():
+                while time.time() - session_start < max_seconds and not done.is_set():
                     try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                        raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
                         msg = json.loads(raw)
                         method = msg.get("method", "")
                         body = msg.get("body", {})
@@ -443,8 +471,8 @@ class RingIntercomCamera(Camera):
                             break
 
                 _LOGGER.debug(
-                    "Signaling loop ended after %.1f s (done=%s)",
-                    time.time() - start, done.is_set(),
+                    "Signaling session ended after %.1f s (done=%s)",
+                    time.time() - session_start, done.is_set(),
                 )
 
                 # Clean close
@@ -463,7 +491,12 @@ class RingIntercomCamera(Camera):
         except Exception:
             _LOGGER.warning("WebRTC signaling error", exc_info=True)
         finally:
-            await pc.close()
+            # aiortc's ICE/DTLS shutdown can stall; bound it so async_camera_image()
+            # still returns within HA's 10 s CAMERA_IMAGE_TIMEOUT.
+            try:
+                await asyncio.wait_for(pc.close(), timeout=SNAPSHOT_CLOSE_TIMEOUT)
+            except Exception:
+                _LOGGER.debug("pc.close() timed out or errored", exc_info=True)
 
     # ---- Record (server-side WebRTC capture to MP4) ----
 
