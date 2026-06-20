@@ -300,6 +300,8 @@ The following features were designed and developed by **Andoni Sánchez ([@asanc
 | **v0.6.1** | ⏱️ **Snapshot timeout fix** | Bounds the server-side snapshot session so `camera.snapshot` / `async_camera_image()` reliably returns within HA's 10 s `CAMERA_IMAGE_TIMEOUT`. |
 | **v0.6.2** | 🔗 **Shared WebRTC session** | The intercom only allows **one live-view session** at a time. The snapshot cache is now fed from the recording's own video track via a `MediaRelay`, so snapshots work *during* a recording instead of conflicting with it. |
 | **v0.6.3** | 🧱 **Whole-session time budget** | Bounds the **entire** server-side session (ticket fetch + websocket handshake + signaling + frame decode) from the very start, with a bounded `recv()` tail and `pc.close()` teardown, keeping it safely under HA's 10 s budget. |
+| **v0.7.0** | 🔊 **Outgoing audio (talk through the intercom)** | New `ring_intercom_camera.say` (TTS) and `ring_intercom_camera.play_media` (audio file/URL) services play **server-side** through the street-panel speaker — no browser, no card. `record` gains an `enable_audio` field so audio can be injected **while a recording runs**, reusing the single live-view session. Services return `delivered`/`reason`/`frames_sent` so automations can react. Default stays receive-only. |
+| **v0.7.1** | 🩹 **Outgoing-audio teardown & off-loop fixes** | Fixes a crash on stop where the audio injector's `asyncio.Lock` shadowed the `threading` lock `pyee`'s `EventEmitter` needs to emit `"ended"`, and moves the blocking `ssl.create_default_context()` (CA-cert disk I/O) off the event loop into the executor. |
 
 > These build on the original WebRTC live-stream camera and server-side snapshot work by **Kilian Ubeda Cano ([@cmos486](https://github.com/cmos486))**.
 
