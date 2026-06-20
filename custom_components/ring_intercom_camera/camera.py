@@ -140,7 +140,11 @@ def _get_injector_class():
             self._pts = 0                # monotonic, in samples
             self._start = None           # wall-clock anchor for pacing
             self._audio_frames = 0       # non-silence frames actually pulled out
-            self._lock = asyncio.Lock()
+            # NOTE: must NOT be named self._lock — the pyee EventEmitter base
+            # (via MediaStreamTrack) uses self._lock internally as a threading
+            # lock for emit()/on(); shadowing it with an asyncio.Lock breaks
+            # emit("ended") on stop() with a TypeError.
+            self._play_lock = asyncio.Lock()
             self._idle = asyncio.Event()
             self._idle.set()             # idle at start
 
@@ -160,7 +164,7 @@ def _get_injector_class():
             if player.audio is None:
                 await self._hass.async_add_executor_job(self._stop_player, player)
                 raise HomeAssistantError(f"{media} has no audio track")
-            async with self._lock:
+            async with self._play_lock:
                 self._stop_source()
                 self._player = player
                 self._source = player.audio
@@ -219,7 +223,7 @@ def _get_injector_class():
             # references only. This keeps the (potentially blocking) source.recv()
             # OUT of the lock, so play() never stalls and a concurrent stop()/play()
             # that nulls/swaps self._* can't crash this in-flight frame.
-            async with self._lock:
+            async with self._play_lock:
                 source = self._source
                 resampler = self._resampler
                 fifo = self._fifo
@@ -251,7 +255,7 @@ def _get_injector_class():
                 elif ended:
                     # Fully drained (incl. flushed tail); only a sub-20 ms remainder
                     # is left — drop it so every emitted frame is a uniform 960.
-                    async with self._lock:
+                    async with self._play_lock:
                         if self._source is source:  # not already swapped by play()
                             self._stop_source()
                             self._idle.set()
@@ -682,7 +686,9 @@ class RingIntercomCamera(Camera):
         dialog_id = str(uuid.uuid4())
         session_id = None
 
-        ssl_ctx = ssl.create_default_context()
+        # create_default_context() loads CA certs from disk (blocking I/O); run
+        # it in the executor so it doesn't block the event loop.
+        ssl_ctx = await self.hass.async_add_executor_job(ssl.create_default_context)
 
         try:
             async with ws_connect(
