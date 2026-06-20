@@ -29,6 +29,50 @@
         "duration": {
           "name": "Duración",
           "description": "Duración de la grabación en segundos."
+        },
+        "enable_audio": {
+          "name": "Habilitar audio",
+          "description": "Negocia un canal de audio saliente para que say/play_media puedan enviar audio al intercom mientras dura esta grabación. Desactivado por defecto (no se envía nada al dispositivo)."
+        }
+      }
+    },
+    "play_media": {
+      "name": "Reproducir audio",
+      "description": "Reproduce un archivo o URL de audio por el altavoz del intercom mediante una sesión WebRTC en el servidor. Reutiliza la sesión de grabación/audio activa si la hay; si no, abre la suya propia.",
+      "fields": {
+        "media": {
+          "name": "Audio",
+          "description": "Ruta o URL del audio a reproducir (cualquier cosa que ffmpeg pueda leer, p. ej. un MP3/WAV o una URL HTTP)."
+        },
+        "timeout": {
+          "name": "Tiempo máximo",
+          "description": "Duración máxima de la sesión de reproducción en segundos."
+        }
+      }
+    },
+    "say": {
+      "name": "Decir (TTS)",
+      "description": "Pronuncia un mensaje de texto por el altavoz del intercom usando el texto-a-voz de Home Assistant. Reutiliza la sesión de grabación/audio activa si la hay; si no, abre la suya propia.",
+      "fields": {
+        "message": {
+          "name": "Mensaje",
+          "description": "Texto a pronunciar."
+        },
+        "language": {
+          "name": "Idioma",
+          "description": "Código de idioma para el motor TTS (p. ej. es, en). Opcional."
+        },
+        "engine": {
+          "name": "Motor TTS",
+          "description": "Motor TTS a usar (entity id o plataforma). Opcional: si se omite se usa el motor por defecto."
+        },
+        "options": {
+          "name": "Opciones",
+          "description": "Opciones específicas del motor (p. ej. voz). Opcional."
+        },
+        "timeout": {
+          "name": "Tiempo máximo",
+          "description": "Duración máxima de la sesión de reproducción en segundos."
         }
       }
     }

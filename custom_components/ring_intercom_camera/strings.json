@@ -29,6 +29,50 @@
         "duration": {
           "name": "Duration",
           "description": "Length of the recording in seconds."
+        },
+        "enable_audio": {
+          "name": "Enable audio",
+          "description": "Negotiate an outgoing audio channel so say/play_media can send audio to the intercom while this recording runs. Off by default (no audio is sent to the device)."
+        }
+      }
+    },
+    "play_media": {
+      "name": "Play media",
+      "description": "Plays an audio file or URL through the intercom's speaker via a server-side WebRTC session. Reuses an active recording/audio session if one is running, otherwise opens its own.",
+      "fields": {
+        "media": {
+          "name": "Media",
+          "description": "Path or URL of the audio to play (anything ffmpeg can read, e.g. an MP3/WAV file or an HTTP URL)."
+        },
+        "timeout": {
+          "name": "Timeout",
+          "description": "Maximum length of the playback session in seconds."
+        }
+      }
+    },
+    "say": {
+      "name": "Say (TTS)",
+      "description": "Speaks a text message through the intercom's speaker using Home Assistant's text-to-speech. Reuses an active recording/audio session if one is running, otherwise opens its own.",
+      "fields": {
+        "message": {
+          "name": "Message",
+          "description": "Text to speak."
+        },
+        "language": {
+          "name": "Language",
+          "description": "Language code for the TTS engine (e.g. es, en). Optional."
+        },
+        "engine": {
+          "name": "TTS engine",
+          "description": "TTS engine to use (entity id or platform). Optional — the default engine is used if omitted."
+        },
+        "options": {
+          "name": "Options",
+          "description": "Engine-specific options (e.g. voice). Optional."
+        },
+        "timeout": {
+          "name": "Timeout",
+          "description": "Maximum length of the playback session in seconds."
         }
       }
     }

@@ -180,6 +180,7 @@ Records a video clip server-side (no browser needed) and saves it as an MP4 file
 | `entity_id` (target) | ✅ | — | The intercom camera entity |
 | `filename` | ✅ | — | Full path of the output MP4. Must be in an allowed path (e.g. under `/media`) |
 | `duration` | ❌ | `20` | Clip length in seconds (1–300) |
+| `enable_audio` | ❌ | `false` | Negotiate an **outgoing** audio channel so `say` / `play_media` can talk to the intercom **while this recording runs**. Off by default — a plain receive-only recording that sends nothing to the device. |
 
 ```yaml
 # Example: record 20 s when someone rings
@@ -191,6 +192,73 @@ Records a video clip server-side (no browser needed) and saves it as an MP4 file
 ```
 
 > 💡 Like the live view, the analog camera only outputs video while activated (ding or handset camera button) — trigger the recording on `binary_sensor.<intercom>_ding` for best results. If no video arrives, the service raises an error and no file is left behind.
+
+### `ring_intercom_camera.play_media`
+
+Plays an audio file or URL **through the intercom's speaker** (server-side, no browser needed). Opens a server-side WebRTC session with an **outgoing** audio track (`aiortc` decodes the source and encodes it to Opus, which is what Ring expects).
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `entity_id` (target) | ✅ | — | The intercom camera entity |
+| `media` | ✅ | — | Path or URL of the audio (anything `ffmpeg` can read — MP3/WAV file or HTTP URL) |
+| `timeout` | ❌ | `60` | Max length of the playback session in seconds (1–300) |
+
+### `ring_intercom_camera.say`
+
+Speaks a text message through the intercom's speaker using Home Assistant's **text-to-speech**. Resolves the message with the TTS integration, then plays it like `play_media`.
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `entity_id` (target) | ✅ | — | The intercom camera entity |
+| `message` | ✅ | — | Text to speak |
+| `language` | ❌ | — | TTS language code (e.g. `es`, `en`) |
+| `engine` | ❌ | default engine | TTS engine (entity id or platform) |
+| `options` | ❌ | — | Engine-specific options (e.g. `voice`) |
+| `timeout` | ❌ | `60` | Max length of the playback session in seconds (1–300) |
+
+```yaml
+# Example: greet the visitor by TTS when someone rings
+- action: ring_intercom_camera.say
+  data:
+    entity_id: camera.portal_camera
+    message: "Hola, ahora mismo le atendemos."
+    language: es
+```
+
+> 🔁 **Single session reuse.** The intercom allows only **one** live view at a time, so `say` / `play_media` never open a second session. If a recording started with `enable_audio: true` (or another play/say) is already running, the audio is injected into that same session; otherwise a dedicated audio-only session is opened. To talk **during** a recording, start the recording with `enable_audio: true`.
+
+> ⚠️ **Routing of server-originated audio to the street panel** depends on the device honouring the outgoing audio m-line — the browser two-way audio proves the hardware supports it, but the server-side path should be validated on your unit.
+
+#### Response (`response_variable`)
+
+Both `say` and `play_media` return a response so automations can tell whether the audio actually went out:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `delivered` | bool | `true` if audio frames were actually sent to the intercom |
+| `reason` | string \| null | `null` on success, else `recording_without_audio`, `no_audio_channel`, or `still_playing` |
+| `frames_sent` | int | Number of audio frames pulled (diagnostic) |
+
+`reason` values:
+- **`recording_without_audio`** — a recording is in progress but was started **without** `enable_audio: true`, so there is no outgoing channel to inject into. Nothing was sent.
+- **`no_audio_channel`** — a session ran but the intercom never pulled any audio (it did not accept the outgoing audio m-line).
+- **`still_playing`** — the clip outlived `timeout` and is still playing in the host session (audio *was* delivered).
+
+```yaml
+# Notify when the greeting could not be delivered
+- action: ring_intercom_camera.say
+  data:
+    entity_id: camera.portal_camera
+    message: "Hola, ahora mismo le atendemos."
+    language: es
+  response_variable: tts_result
+- if: "{{ not tts_result.delivered }}"
+  then:
+    - action: notify.mobile_app_phone
+      data:
+        message: >-
+          No se pudo enviar el audio al portal ({{ tts_result.reason }}).
+```
 
 ---
 

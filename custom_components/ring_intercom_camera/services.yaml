@@ -18,3 +18,65 @@ record:
           max: 300
           unit_of_measurement: seconds
           mode: box
+    enable_audio:
+      required: false
+      default: false
+      selector:
+        boolean:
+
+play_media:
+  target:
+    entity:
+      integration: ring_intercom_camera
+      domain: camera
+  fields:
+    media:
+      required: true
+      example: "/media/local/sounds/welcome.mp3"
+      selector:
+        text:
+    timeout:
+      required: false
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 300
+          unit_of_measurement: seconds
+          mode: box
+
+say:
+  target:
+    entity:
+      integration: ring_intercom_camera
+      domain: camera
+  fields:
+    message:
+      required: true
+      example: "Hola, ahora mismo le atendemos."
+      selector:
+        text:
+    language:
+      required: false
+      example: es
+      selector:
+        text:
+    engine:
+      required: false
+      example: tts.google_translate_es
+      selector:
+        text:
+    options:
+      required: false
+      example: '{"voice": "..."}'
+      selector:
+        object:
+    timeout:
+      required: false
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 300
+          unit_of_measurement: seconds
+          mode: box

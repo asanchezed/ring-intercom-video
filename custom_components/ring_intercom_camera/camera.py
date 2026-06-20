@@ -20,8 +20,10 @@ Three modes of operation:
 from __future__ import annotations
 
 import asyncio
+import fractions
 import logging
 import os
+import tempfile
 import time
 from functools import partial
 from io import BytesIO
@@ -40,12 +42,25 @@ from homeassistant.components.camera import (
     WebRTCSendMessage,
 )
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, SupportsResponse, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import ATTR_DURATION, ATTR_FILENAME, SERVICE_RECORD
+from .const import (
+    ATTR_DURATION,
+    ATTR_ENABLE_AUDIO,
+    ATTR_ENGINE,
+    ATTR_FILENAME,
+    ATTR_LANGUAGE,
+    ATTR_MEDIA,
+    ATTR_MESSAGE,
+    ATTR_OPTIONS,
+    ATTR_TIMEOUT,
+    SERVICE_PLAY_MEDIA,
+    SERVICE_RECORD,
+    SERVICE_SAY,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,6 +86,196 @@ RECORD_DEFAULT_DURATION = 20     # Default clip length (seconds)
 RECORD_MAX_DURATION = 300        # Max clip length accepted by the service
 RECORD_SETUP_MARGIN = 30         # Extra wall time allowed for session setup
 
+# Server-side outgoing audio (TTS / media playback) settings
+AUDIO_SAMPLE_RATE = 48000        # Opus operates at 48 kHz
+AUDIO_FORMAT = "s16"             # 16-bit PCM (what the Opus encoder consumes)
+AUDIO_LAYOUT = "stereo"          # Opus encoder layout
+AUDIO_PTIME = 0.02               # 20 ms frames (Opus frame size)
+AUDIO_SAMPLES_PER_FRAME = int(AUDIO_SAMPLE_RATE * AUDIO_PTIME)  # 960
+PLAY_DEFAULT_TIMEOUT = 60        # Max wall time for a standalone play/say session
+PLAY_MAX_TIMEOUT = 300           # Upper bound accepted by the services
+
+# Built lazily so importing this module never pulls in aiortc/av (the browser
+# live-stream path needs neither). Cached after first use.
+_INJECTOR_CLASS = None
+
+
+def _get_injector_class():
+    """Return the IntercomAudioInjector class, importing aiortc/av lazily."""
+    global _INJECTOR_CLASS
+    if _INJECTOR_CLASS is not None:
+        return _INJECTOR_CLASS
+
+    from aiortc import MediaStreamTrack
+    from aiortc.contrib.media import MediaPlayer
+    from aiortc.mediastreams import MediaStreamError
+    from av import AudioFrame
+    from av.audio.fifo import AudioFifo
+    from av.audio.resampler import AudioResampler
+
+    class IntercomAudioInjector(MediaStreamTrack):
+        """Outgoing audio track: silence when idle, plays a clip on demand.
+
+        Everything it emits is normalized to s16 / 48 kHz / stereo, 960-sample
+        (20 ms) frames with a continuous, monotonically increasing PTS, so the
+        downstream Opus encoder never sees a format change or a PTS jump (either
+        would glitch the audio). Source clips of any rate/format are resampled
+        and re-chunked through an AudioResampler + AudioFifo.
+
+        While a session is alive the track keeps producing frames forever
+        (silence between clips) so the RTP flow — and therefore the WebRTC
+        session — stays up; this is what lets ``say`` be injected repeatedly
+        into a single recording session.
+        """
+
+        kind = "audio"
+
+        def __init__(self, hass) -> None:
+            super().__init__()
+            self._hass = hass
+            self._player = None
+            self._source = None          # current MediaPlayer.audio track
+            self._resampler = None
+            self._fifo = None
+            self._pts = 0                # monotonic, in samples
+            self._start = None           # wall-clock anchor for pacing
+            self._audio_frames = 0       # non-silence frames actually pulled out
+            self._lock = asyncio.Lock()
+            self._idle = asyncio.Event()
+            self._idle.set()             # idle at start
+
+        @property
+        def frames_sent(self) -> int:
+            """Count of real (non-silence) audio frames the sender has pulled.
+
+            Stays at 0 if the sender never calls recv() — i.e. Ring answered the
+            audio m-line as not send-capable from our side, so nothing is going
+            out. Used to report whether audio was actually delivered.
+            """
+            return self._audio_frames
+
+        async def play(self, media: str) -> None:
+            """Start (or replace) playback of an audio source."""
+            player = await self._hass.async_add_executor_job(MediaPlayer, media)
+            if player.audio is None:
+                await self._hass.async_add_executor_job(self._stop_player, player)
+                raise HomeAssistantError(f"{media} has no audio track")
+            async with self._lock:
+                self._stop_source()
+                self._player = player
+                self._source = player.audio
+                self._resampler = AudioResampler(
+                    format=AUDIO_FORMAT, layout=AUDIO_LAYOUT, rate=AUDIO_SAMPLE_RATE
+                )
+                self._fifo = AudioFifo()
+                self._idle.clear()
+
+        async def wait_idle(self, timeout: float | None = None) -> None:
+            """Wait until the current clip has finished playing."""
+            await asyncio.wait_for(self._idle.wait(), timeout)
+
+        def stop(self) -> None:
+            # Release the MediaPlayer (ffmpeg) too — the base stop() only ends
+            # the track, which would otherwise leak the decoder when the session
+            # ends before the clip does (e.g. on timeout).
+            self._stop_source()
+            self._idle.set()
+            super().stop()
+
+        @staticmethod
+        def _stop_player(player) -> None:
+            try:
+                if player.audio is not None:
+                    player.audio.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _stop_source(self) -> None:
+            if self._player is not None:
+                self._stop_player(self._player)
+            self._player = None
+            self._source = None
+            self._resampler = None
+            self._fifo = None
+
+        def _silence_frame(self) -> "AudioFrame":
+            frame = AudioFrame(
+                format=AUDIO_FORMAT,
+                layout=AUDIO_LAYOUT,
+                samples=AUDIO_SAMPLES_PER_FRAME,
+            )
+            for plane in frame.planes:
+                plane.update(bytes(plane.buffer_size))
+            return frame
+
+        async def recv(self) -> "AudioFrame":
+            if self.readyState != "live":
+                raise MediaStreamError
+
+            if self._start is None:
+                self._start = time.time()
+
+            # Snapshot the current source under the lock, then work on the local
+            # references only. This keeps the (potentially blocking) source.recv()
+            # OUT of the lock, so play() never stalls and a concurrent stop()/play()
+            # that nulls/swaps self._* can't crash this in-flight frame.
+            async with self._lock:
+                source = self._source
+                resampler = self._resampler
+                fifo = self._fifo
+
+            frame = None
+            if source is not None and fifo is not None and resampler is not None:
+                ended = False
+                # MediaPlayer throttles file playback to real time, so this await
+                # also paces us; the explicit sleep below only matters for silence
+                # and for draining MediaPlayer's pre-buffer.
+                while fifo.samples < AUDIO_SAMPLES_PER_FRAME:
+                    try:
+                        src_frame = await source.recv()
+                    except MediaStreamError:
+                        # Source exhausted: flush the resampler's internal buffer
+                        # so the tail isn't lost, then stop pulling.
+                        for resampled in resampler.resample(None):
+                            resampled.pts = None
+                            fifo.write(resampled)
+                        ended = True
+                        break
+                    for resampled in resampler.resample(src_frame):
+                        resampled.pts = None  # fifo owns timing; we re-stamp on out
+                        fifo.write(resampled)
+
+                frame = fifo.read(AUDIO_SAMPLES_PER_FRAME)
+                if frame is not None:
+                    self._audio_frames += 1
+                elif ended:
+                    # Fully drained (incl. flushed tail); only a sub-20 ms remainder
+                    # is left — drop it so every emitted frame is a uniform 960.
+                    async with self._lock:
+                        if self._source is source:  # not already swapped by play()
+                            self._stop_source()
+                            self._idle.set()
+
+            if frame is None:
+                frame = self._silence_frame()
+
+            frame.pts = self._pts
+            frame.sample_rate = AUDIO_SAMPLE_RATE
+            frame.time_base = fractions.Fraction(1, AUDIO_SAMPLE_RATE)
+            self._pts += AUDIO_SAMPLES_PER_FRAME
+
+            # Single real-time pacing point, absolute-anchored so it self-corrects
+            # (no cumulative drift) and time spent awaiting the source counts
+            # against the wait — never double-paced.
+            wait = self._start + self._pts / AUDIO_SAMPLE_RATE - time.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+
+            return frame
+
+    _INJECTOR_CLASS = IntercomAudioInjector
+    return _INJECTOR_CLASS
+
 
 def _remove_quietly(path: str) -> None:
     """Remove a file, ignoring errors (e.g. it was never created)."""
@@ -78,6 +283,24 @@ def _remove_quietly(path: str) -> None:
         os.remove(path)
     except OSError:
         pass
+
+
+def _audio_result(delivered: bool, reason: str | None, frames_sent: int = 0) -> dict:
+    """Build the response returned by play_media / say.
+
+    ``delivered``    — True if audio frames actually went out to the intercom.
+    ``reason``       — None on success, else a machine-readable code:
+                       ``recording_without_audio`` (a recording is running but
+                       was started without enable_audio), ``no_audio_channel``
+                       (the session ran but Ring never pulled any audio), or
+                       ``still_playing`` (clip outlived the timeout).
+    ``frames_sent``  — number of audio frames pulled (diagnostic).
+    """
+    return {
+        "delivered": delivered,
+        "reason": reason,
+        "frames_sent": frames_sent,
+    }
 
 
 async def async_setup_entry(
@@ -94,8 +317,34 @@ async def async_setup_entry(
             vol.Optional(ATTR_DURATION, default=RECORD_DEFAULT_DURATION): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=RECORD_MAX_DURATION)
             ),
+            vol.Optional(ATTR_ENABLE_AUDIO, default=False): cv.boolean,
         },
         "async_record_clip",
+    )
+    platform.async_register_entity_service(
+        SERVICE_PLAY_MEDIA,
+        {
+            vol.Required(ATTR_MEDIA): cv.string,
+            vol.Optional(ATTR_TIMEOUT, default=PLAY_DEFAULT_TIMEOUT): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=PLAY_MAX_TIMEOUT)
+            ),
+        },
+        "async_play_media",
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    platform.async_register_entity_service(
+        SERVICE_SAY,
+        {
+            vol.Required(ATTR_MESSAGE): cv.string,
+            vol.Optional(ATTR_LANGUAGE): cv.string,
+            vol.Optional(ATTR_ENGINE): cv.string,
+            vol.Optional(ATTR_OPTIONS): dict,
+            vol.Optional(ATTR_TIMEOUT, default=PLAY_DEFAULT_TIMEOUT): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=PLAY_MAX_TIMEOUT)
+            ),
+        },
+        "async_say",
+        supports_response=SupportsResponse.OPTIONAL,
     )
 
     ring_entries = hass.config_entries.async_entries(RING_DOMAIN)
@@ -151,6 +400,13 @@ class RingIntercomCamera(Camera):
         # Clip recording state
         self._recording: bool = False
 
+        # Outgoing-audio state. _audio_injector is set whenever an audio-capable
+        # session (a recording started with enable_audio, or a standalone
+        # play/say) is live, so say/play can reuse that single session instead
+        # of opening a second one (the device allows only one live view).
+        self._audio_injector: Any | None = None
+        self._audio_lock = asyncio.Lock()
+
     @property
     def is_recording(self) -> bool:
         return self._recording
@@ -192,6 +448,12 @@ class RingIntercomCamera(Camera):
                 and time.time() < deadline
             ):
                 await asyncio.sleep(0.25)
+            return self._last_image
+
+        # A standalone outgoing-audio session (play/say without recording) holds
+        # the single live view; don't open a second session — serve the last
+        # cached frame (may be stale or None).
+        if self._audio_injector is not None:
             return self._last_image
 
         # Return cache if fresh
@@ -356,6 +618,7 @@ class RingIntercomCamera(Camera):
         done: asyncio.Event,
         max_seconds: float,
         recv_timeout: float = 3,
+        audio_out_track=None,
     ) -> None:
         """Drive a server-side WebRTC session over Ring signaling.
 
@@ -368,6 +631,14 @@ class RingIntercomCamera(Camera):
         signaling loop. ``recv_timeout`` caps each ``ws.recv()`` so the loop's
         tail past ``max_seconds`` stays small — the snapshot path needs this to
         finish inside HA's 10 s CAMERA_IMAGE_TIMEOUT; recording keeps the default.
+
+        ``audio_out_track`` (optional): an outgoing audio MediaStreamTrack. When
+        given, the offer carries a send(recv) audio m-line and ``audio_enabled``
+        is set so Ring routes the audio to the intercom's speaker. Must be added
+        before the offer is created — WebRTC fixes m-line directions at
+        offer/answer time and Ring expects audio in the initial offer (it does
+        not renegotiate mid-session). When omitted, the session is receive-only
+        (snapshot/record behaviour, unchanged).
         """
         session_start = time.time()
         from aiortc import RTCSessionDescription
@@ -399,7 +670,10 @@ class RingIntercomCamera(Camera):
 
         # 2. Setup peer connection offer
         pc.addTransceiver("video", direction="recvonly")
-        pc.addTransceiver("audio", direction="recvonly")
+        if audio_out_track is not None:
+            pc.addTrack(audio_out_track)  # outgoing audio (send to intercom)
+        else:
+            pc.addTransceiver("audio", direction="recvonly")
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
 
@@ -422,7 +696,7 @@ class RingIntercomCamera(Camera):
                     "body": {
                         "doorbot_id": self._device.device_api_id,
                         "stream_options": {
-                            "audio_enabled": False,
+                            "audio_enabled": audio_out_track is not None,
                             "video_enabled": True,
                         },
                         "sdp": pc.localDescription.sdp,
@@ -500,8 +774,17 @@ class RingIntercomCamera(Camera):
 
     # ---- Record (server-side WebRTC capture to MP4) ----
 
-    async def async_record_clip(self, filename: str, duration: int) -> None:
-        """Record a video clip (ring_intercom_camera.record service)."""
+    async def async_record_clip(
+        self, filename: str, duration: int, enable_audio: bool = False
+    ) -> None:
+        """Record a video clip (ring_intercom_camera.record service).
+
+        When ``enable_audio`` is True the session is negotiated audio-capable
+        (an outgoing audio track is added from the start), so ``say``/
+        ``play_media`` can inject audio into this same session while it records.
+        It defaults to False: a plain receive-only recording that never sends
+        anything to the intercom (no silence on the line).
+        """
         if not self.hass.config.is_allowed_path(filename):
             raise HomeAssistantError(
                 f"Cannot write {filename}, no access to path; "
@@ -509,6 +792,10 @@ class RingIntercomCamera(Camera):
             )
         if self._recording:
             raise HomeAssistantError(f"{self.entity_id} is already recording")
+        if self._audio_injector is not None:
+            raise HomeAssistantError(
+                f"{self.entity_id} has an audio session in progress"
+            )
 
         try:
             from aiortc import RTCPeerConnection
@@ -523,6 +810,7 @@ class RingIntercomCamera(Camera):
             partial(os.makedirs, os.path.dirname(filename), exist_ok=True)
         )
 
+        injector = _get_injector_class()(self.hass) if enable_audio else None
         pc = RTCPeerConnection()
         # MediaRecorder opens the output container on creation (blocking I/O)
         recorder = await self.hass.async_add_executor_job(MediaRecorder, filename)
@@ -551,13 +839,20 @@ class RingIntercomCamera(Camera):
             asyncio.get_running_loop().call_later(duration, record_done.set)
 
         self._recording = True
+        self._audio_injector = injector
         self.async_write_ha_state()
         try:
             await self._run_webrtc_session(
-                pc, done=record_done, max_seconds=duration + RECORD_SETUP_MARGIN
+                pc,
+                done=record_done,
+                max_seconds=duration + RECORD_SETUP_MARGIN,
+                audio_out_track=injector,
             )
         finally:
             self._recording = False
+            self._audio_injector = None
+            if injector is not None:
+                injector.stop()
             self.async_write_ha_state()
             if task := cache_feed["task"]:
                 task.cancel()
@@ -575,6 +870,162 @@ class RingIntercomCamera(Camera):
         _LOGGER.info(
             "Saved %d s clip from %s to %s", duration, self.entity_id, filename
         )
+
+    # ---- Outgoing audio (server-side WebRTC TTS / media playback) ----
+
+    async def async_play_media(
+        self, media: str, timeout: int = PLAY_DEFAULT_TIMEOUT
+    ) -> dict:
+        """Play an audio file or URL through the intercom speaker.
+
+        (``ring_intercom_camera.play_media`` service.) Returns a response with
+        ``delivered`` / ``reason`` / ``frames_sent`` so automations can react
+        when audio could not be sent.
+        """
+        return await self._send_audio(media, timeout)
+
+    async def async_say(
+        self,
+        message: str,
+        language: str | None = None,
+        engine: str | None = None,
+        options: dict | None = None,
+        timeout: int = PLAY_DEFAULT_TIMEOUT,
+    ) -> dict:
+        """Speak a TTS message through the intercom speaker.
+
+        (``ring_intercom_camera.say`` service.) Resolves the message with HA's
+        TTS, writes it to a temp file and plays it like ``play_media``. Returns
+        the same ``delivered`` / ``reason`` / ``frames_sent`` response.
+        """
+        from homeassistant.components import tts
+
+        media_source_id = tts.generate_media_source_id(
+            self.hass,
+            message,
+            engine=engine,
+            language=language,
+            options=options,
+        )
+        extension, data = await tts.async_get_media_source_audio(
+            self.hass, media_source_id
+        )
+        path = await self.hass.async_add_executor_job(
+            self._write_temp_audio, data, extension
+        )
+        try:
+            return await self._send_audio(path, timeout)
+        finally:
+            await self.hass.async_add_executor_job(_remove_quietly, path)
+
+    @staticmethod
+    def _write_temp_audio(data: bytes, extension: str) -> str:
+        fd, path = tempfile.mkstemp(
+            prefix="ring_intercom_tts_", suffix=f".{extension}"
+        )
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        return path
+
+    async def _send_audio(self, media: str, timeout: int) -> dict:
+        """Route audio to the intercom, reusing an active session if there is one.
+
+        The device allows only one live view, so this never opens a second
+        session: if a recording (with ``enable_audio``) or another play/say is
+        already running, the audio is injected into that session; otherwise a
+        dedicated audio-only session is opened. Returns a response dict (see
+        :func:`_audio_result`) instead of raising when audio cannot be sent for
+        an expected reason, so automations can branch on the result.
+        """
+        if self._recording and self._audio_injector is None:
+            # A recording is running but was started without enable_audio, so no
+            # outgoing audio channel exists. Report it instead of raising so the
+            # automation can notify.
+            _LOGGER.warning(
+                "%s: audio not sent — recording is running without enable_audio",
+                self.entity_id,
+            )
+            return _audio_result(False, "recording_without_audio")
+
+        if self._audio_injector is not None:
+            return await self._inject(self._audio_injector, media, timeout)
+
+        async with self._audio_lock:
+            # A session may have started while we waited for the lock.
+            if self._audio_injector is not None:
+                return await self._inject(self._audio_injector, media, timeout)
+            return await self._play_standalone(media, timeout)
+
+    @staticmethod
+    async def _inject(injector, media: str, timeout: int) -> dict:
+        """Feed a clip into an already-running injector and wait for it to finish."""
+        mark = injector.frames_sent
+        await injector.play(media)
+        still_playing = False
+        try:
+            await injector.wait_idle(timeout)
+        except asyncio.TimeoutError:
+            # Clip longer than timeout: leave it playing in the host session.
+            still_playing = True
+            _LOGGER.debug("Audio playback still running after %d s", timeout)
+
+        sent = injector.frames_sent - mark
+        if sent <= 0:
+            _LOGGER.warning(
+                "Audio session produced no outgoing frames — the intercom did "
+                "not accept the audio channel"
+            )
+            return _audio_result(False, "no_audio_channel", 0)
+        return _audio_result(True, "still_playing" if still_playing else None, sent)
+
+    async def _play_standalone(self, media: str, timeout: int) -> dict:
+        """Open a dedicated audio-only WebRTC session and play one clip."""
+        try:
+            from aiortc import RTCPeerConnection
+        except ImportError as err:
+            raise HomeAssistantError(
+                "aiortc not available — audio playback requires aiortc."
+            ) from err
+
+        injector = _get_injector_class()(self.hass)
+        pc = RTCPeerConnection()
+        done = asyncio.Event()
+        self._audio_injector = injector
+        session_task = asyncio.create_task(
+            self._run_webrtc_session(
+                pc, done=done, max_seconds=timeout, audio_out_track=injector
+            )
+        )
+        try:
+            await injector.play(media)
+            idle_task = asyncio.create_task(injector.wait_idle())
+            # End when the clip finishes, the session closes, or timeout hits.
+            await asyncio.wait(
+                {idle_task, session_task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            idle_task.cancel()
+        finally:
+            done.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(session_task), timeout=10)
+            except asyncio.CancelledError:
+                session_task.cancel()
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("Audio session teardown error", exc_info=True)
+                session_task.cancel()
+            self._audio_injector = None
+            injector.stop()
+
+        sent = injector.frames_sent
+        if sent <= 0:
+            _LOGGER.warning(
+                "Audio session produced no outgoing frames — the intercom did "
+                "not accept the audio channel"
+            )
+            return _audio_result(False, "no_audio_channel", 0)
+        return _audio_result(True, None, sent)
 
     # ---- Live stream (browser WebRTC signaling bridge) ----
 
