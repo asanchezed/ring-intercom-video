@@ -221,6 +221,22 @@ Records a video clip server-side (no browser needed) and saves it as an MP4 file
 
 ---
 
+## 🚀 Improvements in this fork
+
+The following features were designed and developed by **Andoni Sánchez ([@asanchezed](https://github.com/asanchezed))** on top of the original integration:
+
+| Version | Improvement | What it adds |
+|---|---|---|
+| **v0.5.0** | 🧭 **UI config flow** | Migrated from YAML to a guided **Settings → Devices & Services** setup (single config entry, no credentials). Existing `ring_intercom_camera:` YAML is **auto-imported** into a config entry, with a repair issue reminding you to remove the obsolete YAML. Includes `en`/`es` translations. |
+| **v0.6.0** | 🎬 **`ring_intercom_camera.record` service** | Server-side **MP4 recording** with no browser open. Works around the standard `camera.record` service, which needs an RTSP/HLS `stream_source` this WebRTC-only camera doesn't have — uses `aiortc`'s `MediaRecorder` to write the video track to disk. |
+| **v0.6.1** | ⏱️ **Snapshot timeout fix** | Bounds the server-side snapshot session so `camera.snapshot` / `async_camera_image()` reliably returns within HA's 10 s `CAMERA_IMAGE_TIMEOUT`. |
+| **v0.6.2** | 🔗 **Shared WebRTC session** | The intercom only allows **one live-view session** at a time. The snapshot cache is now fed from the recording's own video track via a `MediaRelay`, so snapshots work *during* a recording instead of conflicting with it. |
+| **v0.6.3** | 🧱 **Whole-session time budget** | Bounds the **entire** server-side session (ticket fetch + websocket handshake + signaling + frame decode) from the very start, with a bounded `recv()` tail and `pc.close()` teardown, keeping it safely under HA's 10 s budget. |
+
+> These build on the original WebRTC live-stream camera and server-side snapshot work by **Kilian Ubeda Cano ([@cmos486](https://github.com/cmos486))**.
+
+---
+
 ## 🙏 Attribution
 
 This integration builds on top of:
