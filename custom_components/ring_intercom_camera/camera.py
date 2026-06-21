@@ -732,6 +732,15 @@ class RingIntercomCamera(Camera):
         ws_uri = RTC_STREAMING_WEB_SOCKET_ENDPOINT.format(uuid.uuid4(), ticket)
         dialog_id = str(uuid.uuid4())
         session_id = None
+        # Ring keeps the device speaker in "stealth" (muted) mode by default.
+        # activate_session is liveness only — to actually play server-originated
+        # audio the speaker must be un-muted with camera_options{stealth_mode:
+        # false} once the session is up. This mirrors ring-client-api's
+        # activateCameraSpeaker() and python-ring-doorbell. Only do it when we
+        # are actually sending audio (audio_out_track is not None).
+        camera_connected = False
+        speaker_activated = False
+        send_speaker = audio_out_track is not None
 
         # create_default_context() loads CA certs from disk (blocking I/O); run
         # it in the executor so it doesn't block the event loop.
@@ -783,10 +792,33 @@ class RingIntercomCamera(Camera):
                         elif method == "session_created":
                             session_id = body.get("session_id")
                             _LOGGER.debug("Signaling session created")
+                            # camera_connected may arrive before session_created;
+                            # if so, un-mute the speaker now that we have a id.
+                            if (
+                                send_speaker
+                                and camera_connected
+                                and session_id
+                                and not speaker_activated
+                            ):
+                                await ws.send(json.dumps({
+                                    "method": "camera_options",
+                                    "dialog_id": dialog_id,
+                                    "body": {
+                                        "doorbot_id": self._device.device_api_id,
+                                        "session_id": session_id,
+                                        "stealth_mode": False,
+                                    },
+                                }))
+                                speaker_activated = True
+                                _LOGGER.debug(
+                                    "[audio-diag] sent camera_options "
+                                    "stealth_mode=false"
+                                )
                         elif (
                             method == "notification"
                             and body.get("text") == "camera_connected"
                         ):
+                            camera_connected = True
                             _LOGGER.debug("Camera connected, activating session")
                             if session_id:
                                 await ws.send(json.dumps({
@@ -797,6 +829,23 @@ class RingIntercomCamera(Camera):
                                         "session_id": session_id,
                                     },
                                 }))
+                                # Un-mute the panel speaker so server-originated
+                                # audio actually plays (the step we were missing).
+                                if send_speaker and not speaker_activated:
+                                    await ws.send(json.dumps({
+                                        "method": "camera_options",
+                                        "dialog_id": dialog_id,
+                                        "body": {
+                                            "doorbot_id": self._device.device_api_id,
+                                            "session_id": session_id,
+                                            "stealth_mode": False,
+                                        },
+                                    }))
+                                    speaker_activated = True
+                                    _LOGGER.debug(
+                                        "[audio-diag] sent camera_options "
+                                        "stealth_mode=false"
+                                    )
                         elif method == "close":
                             break
                     except asyncio.TimeoutError:
