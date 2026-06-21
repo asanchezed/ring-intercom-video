@@ -52,6 +52,7 @@ from .const import (
     ATTR_ENABLE_AUDIO,
     ATTR_ENGINE,
     ATTR_FILENAME,
+    ATTR_GAIN,
     ATTR_LANGUAGE,
     ATTR_MEDIA,
     ATTR_MESSAGE,
@@ -94,6 +95,10 @@ AUDIO_PTIME = 0.02               # 20 ms frames (Opus frame size)
 AUDIO_SAMPLES_PER_FRAME = int(AUDIO_SAMPLE_RATE * AUDIO_PTIME)  # 960
 PLAY_DEFAULT_TIMEOUT = 60        # Max wall time for a standalone play/say session
 PLAY_MAX_TIMEOUT = 300           # Upper bound accepted by the services
+# Outgoing audio tends to arrive quiet at the panel (HA TTS is low level), so a
+# gain boost is applied by default. Hard-clipped to s16 full scale.
+AUDIO_DEFAULT_GAIN = 6.0         # Default volume multiplier for say/play_media
+AUDIO_MAX_GAIN = 32.0            # Upper bound accepted by the services
 
 # Built lazily so importing this module never pulls in aiortc/av (the browser
 # live-stream path needs neither). Cached after first use.
@@ -105,6 +110,8 @@ def _get_injector_class():
     global _INJECTOR_CLASS
     if _INJECTOR_CLASS is not None:
         return _INJECTOR_CLASS
+
+    import numpy as np
 
     from aiortc import MediaStreamTrack
     from aiortc.contrib.media import MediaPlayer
@@ -140,6 +147,7 @@ def _get_injector_class():
             self._pts = 0                # monotonic, in samples
             self._start = None           # wall-clock anchor for pacing
             self._audio_frames = 0       # non-silence frames actually pulled out
+            self._gain = 1.0             # volume multiplier for the current clip
             # NOTE: must NOT be named self._lock — the pyee EventEmitter base
             # (via MediaStreamTrack) uses self._lock internally as a threading
             # lock for emit()/on(); shadowing it with an asyncio.Lock breaks
@@ -158,8 +166,12 @@ def _get_injector_class():
             """
             return self._audio_frames
 
-        async def play(self, media: str) -> None:
-            """Start (or replace) playback of an audio source."""
+        async def play(self, media: str, gain: float = 1.0) -> None:
+            """Start (or replace) playback of an audio source.
+
+            ``gain`` multiplies the audio level (hard-clipped to s16 full scale)
+            so a quiet TTS clip can be made audible on the panel speaker.
+            """
             player = await self._hass.async_add_executor_job(MediaPlayer, media)
             if player.audio is None:
                 await self._hass.async_add_executor_job(self._stop_player, player)
@@ -172,7 +184,20 @@ def _get_injector_class():
                     format=AUDIO_FORMAT, layout=AUDIO_LAYOUT, rate=AUDIO_SAMPLE_RATE
                 )
                 self._fifo = AudioFifo()
+                self._gain = max(0.0, min(float(gain), AUDIO_MAX_GAIN))
                 self._idle.clear()
+
+        def _apply_gain(self, frame: "AudioFrame") -> "AudioFrame":
+            """Scale a frame's PCM by self._gain, hard-clipped to s16 range."""
+            if self._gain == 1.0:
+                return frame
+            arr = frame.to_ndarray().astype(np.float32) * self._gain
+            np.clip(arr, -32768.0, 32767.0, out=arr)
+            out = AudioFrame.from_ndarray(
+                arr.astype(np.int16), format=AUDIO_FORMAT, layout=AUDIO_LAYOUT
+            )
+            out.sample_rate = AUDIO_SAMPLE_RATE
+            return out
 
         async def wait_idle(self, timeout: float | None = None) -> None:
             """Wait until the current clip has finished playing."""
@@ -251,6 +276,7 @@ def _get_injector_class():
 
                 frame = fifo.read(AUDIO_SAMPLES_PER_FRAME)
                 if frame is not None:
+                    frame = self._apply_gain(frame)  # boost volume (clipped)
                     self._audio_frames += 1
                     # [audio-diag] confirm we're emitting real audio, not silence
                     if self._audio_frames <= 3 or self._audio_frames % 40 == 0:
@@ -343,6 +369,9 @@ async def async_setup_entry(
             vol.Optional(ATTR_TIMEOUT, default=PLAY_DEFAULT_TIMEOUT): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=PLAY_MAX_TIMEOUT)
             ),
+            vol.Optional(ATTR_GAIN, default=AUDIO_DEFAULT_GAIN): vol.All(
+                vol.Coerce(float), vol.Range(min=0, max=AUDIO_MAX_GAIN)
+            ),
         },
         "async_play_media",
         supports_response=SupportsResponse.OPTIONAL,
@@ -356,6 +385,9 @@ async def async_setup_entry(
             vol.Optional(ATTR_OPTIONS): dict,
             vol.Optional(ATTR_TIMEOUT, default=PLAY_DEFAULT_TIMEOUT): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=PLAY_MAX_TIMEOUT)
+            ),
+            vol.Optional(ATTR_GAIN, default=AUDIO_DEFAULT_GAIN): vol.All(
+                vol.Coerce(float), vol.Range(min=0, max=AUDIO_MAX_GAIN)
             ),
         },
         "async_say",
@@ -901,15 +933,18 @@ class RingIntercomCamera(Camera):
     # ---- Outgoing audio (server-side WebRTC TTS / media playback) ----
 
     async def async_play_media(
-        self, media: str, timeout: int = PLAY_DEFAULT_TIMEOUT
+        self,
+        media: str,
+        timeout: int = PLAY_DEFAULT_TIMEOUT,
+        gain: float = AUDIO_DEFAULT_GAIN,
     ) -> dict:
         """Play an audio file or URL through the intercom speaker.
 
-        (``ring_intercom_camera.play_media`` service.) Returns a response with
-        ``delivered`` / ``reason`` / ``frames_sent`` so automations can react
-        when audio could not be sent.
+        (``ring_intercom_camera.play_media`` service.) ``gain`` boosts the
+        volume (hard-clipped). Returns a response with ``delivered`` /
+        ``reason`` / ``frames_sent`` so automations can react.
         """
-        return await self._send_audio(media, timeout)
+        return await self._send_audio(media, timeout, gain)
 
     async def async_say(
         self,
@@ -918,12 +953,14 @@ class RingIntercomCamera(Camera):
         engine: str | None = None,
         options: dict | None = None,
         timeout: int = PLAY_DEFAULT_TIMEOUT,
+        gain: float = AUDIO_DEFAULT_GAIN,
     ) -> dict:
         """Speak a TTS message through the intercom speaker.
 
         (``ring_intercom_camera.say`` service.) Resolves the message with HA's
-        TTS, writes it to a temp file and plays it like ``play_media``. Returns
-        the same ``delivered`` / ``reason`` / ``frames_sent`` response.
+        TTS, writes it to a temp file and plays it like ``play_media``. ``gain``
+        boosts the volume. Returns the same ``delivered`` / ``reason`` /
+        ``frames_sent`` response.
         """
         from homeassistant.components import tts
 
@@ -941,7 +978,7 @@ class RingIntercomCamera(Camera):
             self._write_temp_audio, data, extension
         )
         try:
-            return await self._send_audio(path, timeout)
+            return await self._send_audio(path, timeout, gain)
         finally:
             await self.hass.async_add_executor_job(_remove_quietly, path)
 
@@ -954,7 +991,9 @@ class RingIntercomCamera(Camera):
             handle.write(data)
         return path
 
-    async def _send_audio(self, media: str, timeout: int) -> dict:
+    async def _send_audio(
+        self, media: str, timeout: int, gain: float = 1.0
+    ) -> dict:
         """Route audio to the intercom, reusing an active session if there is one.
 
         The device allows only one live view, so this never opens a second
@@ -975,19 +1014,19 @@ class RingIntercomCamera(Camera):
             return _audio_result(False, "recording_without_audio")
 
         if self._audio_injector is not None:
-            return await self._inject(self._audio_injector, media, timeout)
+            return await self._inject(self._audio_injector, media, timeout, gain)
 
         async with self._audio_lock:
             # A session may have started while we waited for the lock.
             if self._audio_injector is not None:
-                return await self._inject(self._audio_injector, media, timeout)
-            return await self._play_standalone(media, timeout)
+                return await self._inject(self._audio_injector, media, timeout, gain)
+            return await self._play_standalone(media, timeout, gain)
 
     @staticmethod
-    async def _inject(injector, media: str, timeout: int) -> dict:
+    async def _inject(injector, media: str, timeout: int, gain: float = 1.0) -> dict:
         """Feed a clip into an already-running injector and wait for it to finish."""
         mark = injector.frames_sent
-        await injector.play(media)
+        await injector.play(media, gain)
         still_playing = False
         try:
             await injector.wait_idle(timeout)
@@ -1005,7 +1044,9 @@ class RingIntercomCamera(Camera):
             return _audio_result(False, "no_audio_channel", 0)
         return _audio_result(True, "still_playing" if still_playing else None, sent)
 
-    async def _play_standalone(self, media: str, timeout: int) -> dict:
+    async def _play_standalone(
+        self, media: str, timeout: int, gain: float = 1.0
+    ) -> dict:
         """Open a dedicated audio-only WebRTC session and play one clip."""
         try:
             from aiortc import RTCPeerConnection
@@ -1024,7 +1065,7 @@ class RingIntercomCamera(Camera):
             )
         )
         try:
-            await injector.play(media)
+            await injector.play(media, gain)
             idle_task = asyncio.create_task(injector.wait_idle())
             # End when the clip finishes, the session closes, or timeout hits.
             await asyncio.wait(

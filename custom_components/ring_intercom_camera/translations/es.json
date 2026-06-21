@@ -47,6 +47,10 @@
         "timeout": {
           "name": "Tiempo máximo",
           "description": "Duración máxima de la sesión de reproducción en segundos."
+        },
+        "gain": {
+          "name": "Ganancia",
+          "description": "Multiplicador de volumen (con recorte). Por defecto 6 sube el audio (que suele ir flojo) para que se oiga en el panel; usa 1 para no amplificar."
         }
       }
     },
@@ -73,6 +77,10 @@
         "timeout": {
           "name": "Tiempo máximo",
           "description": "Duración máxima de la sesión de reproducción en segundos."
+        },
+        "gain": {
+          "name": "Ganancia",
+          "description": "Multiplicador de volumen (con recorte). Por defecto 6 sube el TTS (que suele ir flojo) para que se oiga en el panel; usa 1 para no amplificar."
         }
       }
     }

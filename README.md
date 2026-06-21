@@ -202,6 +202,7 @@ Plays an audio file or URL **through the intercom's speaker** (server-side, no b
 | `entity_id` (target) | ✅ | — | The intercom camera entity |
 | `media` | ✅ | — | Path or URL of the audio (anything `ffmpeg` can read — MP3/WAV file or HTTP URL) |
 | `timeout` | ❌ | `60` | Max length of the playback session in seconds (1–300) |
+| `gain` | ❌ | `6` | Volume multiplier (hard-clipped, 0–32). The outgoing audio arrives quiet at the panel, so it's boosted by default; `1` = no boost |
 
 ### `ring_intercom_camera.say`
 
@@ -215,6 +216,7 @@ Speaks a text message through the intercom's speaker using Home Assistant's **te
 | `engine` | ❌ | default engine | TTS engine (entity id or platform) |
 | `options` | ❌ | — | Engine-specific options (e.g. `voice`) |
 | `timeout` | ❌ | `60` | Max length of the playback session in seconds (1–300) |
+| `gain` | ❌ | `6` | Volume multiplier (hard-clipped, 0–32). TTS arrives quiet at the panel, so it's boosted by default; `1` = no boost |
 
 ```yaml
 # Example: greet the visitor by TTS when someone rings
@@ -315,6 +317,7 @@ The following features were designed and developed by **Andoni Sánchez ([@asanc
 | **v0.7.0** | 🔊 **Outgoing audio (talk through the intercom)** | New `ring_intercom_camera.say` (TTS) and `ring_intercom_camera.play_media` (audio file/URL) services play **server-side** through the street-panel speaker — no browser, no card. `record` gains an `enable_audio` field so audio can be injected **while a recording runs**, reusing the single live-view session. Services return `delivered`/`reason`/`frames_sent` so automations can react. Default stays receive-only. |
 | **v0.7.1** | 🩹 **Outgoing-audio teardown & off-loop fixes** | Fixes a crash on stop where the audio injector's `asyncio.Lock` shadowed the `threading` lock `pyee`'s `EventEmitter` needs to emit `"ended"`, and moves the blocking `ssl.create_default_context()` (CA-cert disk I/O) off the event loop into the executor. |
 | **v0.7.2** | 🔎 **Outgoing-audio diagnostics** | Adds DEBUG-level `[audio-diag]` logging on the outgoing-audio path — the **SDP offer** and Ring's **SDP answer** (negotiated audio codec/direction) and the **peak amplitude** of emitted frames (silence vs real audio) — to diagnose why server-sent talk-down may not play on the panel. Debug-gated only; no behaviour change at the default log level. |
+| **v0.7.3** | 🔊 **Outgoing-audio gain** | `say` / `play_media` gain a `gain` field (default **6×**, hard-clipped) that amplifies the outgoing audio — HA TTS arrives quiet at the panel (peaks measured ~10% of full scale), so it was often inaudible. Tune per call (`gain: 1` disables the boost). |
 
 > These build on the original WebRTC live-stream camera and server-side snapshot work by **Kilian Ubeda Cano ([@cmos486](https://github.com/cmos486))**.
 

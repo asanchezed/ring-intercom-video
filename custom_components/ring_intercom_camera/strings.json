@@ -47,6 +47,10 @@
         "timeout": {
           "name": "Timeout",
           "description": "Maximum length of the playback session in seconds."
+        },
+        "gain": {
+          "name": "Gain",
+          "description": "Volume multiplier (hard-clipped). Default 6 boosts the typically-quiet audio so it's audible on the panel; use 1 for no boost."
         }
       }
     },
@@ -73,6 +77,10 @@
         "timeout": {
           "name": "Timeout",
           "description": "Maximum length of the playback session in seconds."
+        },
+        "gain": {
+          "name": "Gain",
+          "description": "Volume multiplier (hard-clipped). Default 6 boosts the typically-quiet TTS so it's audible on the panel; use 1 for no boost."
         }
       }
     }

@@ -44,6 +44,15 @@ play_media:
           max: 300
           unit_of_measurement: seconds
           mode: box
+    gain:
+      required: false
+      default: 6.0
+      selector:
+        number:
+          min: 0
+          max: 32
+          step: 0.5
+          mode: box
 
 say:
   target:
@@ -79,4 +88,13 @@ say:
           min: 1
           max: 300
           unit_of_measurement: seconds
+          mode: box
+    gain:
+      required: false
+      default: 6.0
+      selector:
+        number:
+          min: 0
+          max: 32
+          step: 0.5
           mode: box
