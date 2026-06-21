@@ -287,6 +287,18 @@ Both `say` and `play_media` return a response so automations can tell whether th
 - **Not required.** This component uses WebRTC live view which works without any subscription
 - Snapshots and recordings stored in the cloud do require Ring Protect, but this component doesn't use those APIs
 
+**❓ Outgoing audio (`say` / `play_media`) is sent but not heard on the panel**
+- The services report `delivered: true` once audio frames are sent; whether the **street-panel speaker** plays them depends on the device honouring the outgoing audio m-line.
+- Enable DEBUG logging to inspect the session (v0.7.2+):
+  ```yaml
+  logger:
+    logs:
+      custom_components.ring_intercom_camera: debug
+  ```
+  Then look for `[audio-diag]` lines on the next call:
+  - **`SDP ANSWER`** — the audio codec and direction Ring negotiated (confirms Ring is accepting outgoing audio).
+  - **`out frame #N peak=…`** — `peak` well above `0` means real audio is being emitted; `peak=0` would mean silence (a local pipeline bug).
+
 ---
 
 ## 🚀 Improvements in this fork
@@ -302,6 +314,7 @@ The following features were designed and developed by **Andoni Sánchez ([@asanc
 | **v0.6.3** | 🧱 **Whole-session time budget** | Bounds the **entire** server-side session (ticket fetch + websocket handshake + signaling + frame decode) from the very start, with a bounded `recv()` tail and `pc.close()` teardown, keeping it safely under HA's 10 s budget. |
 | **v0.7.0** | 🔊 **Outgoing audio (talk through the intercom)** | New `ring_intercom_camera.say` (TTS) and `ring_intercom_camera.play_media` (audio file/URL) services play **server-side** through the street-panel speaker — no browser, no card. `record` gains an `enable_audio` field so audio can be injected **while a recording runs**, reusing the single live-view session. Services return `delivered`/`reason`/`frames_sent` so automations can react. Default stays receive-only. |
 | **v0.7.1** | 🩹 **Outgoing-audio teardown & off-loop fixes** | Fixes a crash on stop where the audio injector's `asyncio.Lock` shadowed the `threading` lock `pyee`'s `EventEmitter` needs to emit `"ended"`, and moves the blocking `ssl.create_default_context()` (CA-cert disk I/O) off the event loop into the executor. |
+| **v0.7.2** | 🔎 **Outgoing-audio diagnostics** | Adds DEBUG-level `[audio-diag]` logging on the outgoing-audio path — the **SDP offer** and Ring's **SDP answer** (negotiated audio codec/direction) and the **peak amplitude** of emitted frames (silence vs real audio) — to diagnose why server-sent talk-down may not play on the panel. Debug-gated only; no behaviour change at the default log level. |
 
 > These build on the original WebRTC live-stream camera and server-side snapshot work by **Kilian Ubeda Cano ([@cmos486](https://github.com/cmos486))**.
 

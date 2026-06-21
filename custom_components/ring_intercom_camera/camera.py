@@ -252,6 +252,17 @@ def _get_injector_class():
                 frame = fifo.read(AUDIO_SAMPLES_PER_FRAME)
                 if frame is not None:
                     self._audio_frames += 1
+                    # [audio-diag] confirm we're emitting real audio, not silence
+                    if self._audio_frames <= 3 or self._audio_frames % 40 == 0:
+                        try:
+                            peak = int(abs(frame.to_ndarray()).max())
+                        except Exception:  # noqa: BLE001
+                            peak = -1
+                        _LOGGER.debug(
+                            "[audio-diag] out frame #%d peak=%d (0=silence, "
+                            "~32767=full scale s16)",
+                            self._audio_frames, peak,
+                        )
                 elif ended:
                     # Fully drained (incl. flushed tail); only a sub-20 ms remainder
                     # is left — drop it so every emitted frame is a uniform 960.
@@ -680,6 +691,10 @@ class RingIntercomCamera(Camera):
             pc.addTransceiver("audio", direction="recvonly")
         offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
+        if audio_out_track is not None:
+            _LOGGER.debug(
+                "[audio-diag] SDP OFFER (audio_out):\n%s", pc.localDescription.sdp
+            )
 
         # 3. WebSocket signaling
         ws_uri = RTC_STREAMING_WEB_SOCKET_ENDPOINT.format(uuid.uuid4(), ticket)
@@ -721,7 +736,13 @@ class RingIntercomCamera(Camera):
                         if method == "sdp":
                             sdp = body.get("sdp", "")
                             if sdp:
-                                _LOGGER.debug("Received SDP answer")
+                                if audio_out_track is not None:
+                                    _LOGGER.debug(
+                                        "[audio-diag] SDP ANSWER (audio_out):\n%s",
+                                        sdp,
+                                    )
+                                else:
+                                    _LOGGER.debug("Received SDP answer")
                                 await pc.setRemoteDescription(
                                     RTCSessionDescription(
                                         sdp=sdp, type="answer"
