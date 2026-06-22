@@ -1,0 +1,14 @@
+{
+  "entity": {
+    "camera": {
+      "intercom": {
+        "default": "mdi:doorbell-video"
+      }
+    }
+  },
+  "services": {
+    "record": { "service": "mdi:record-rec" },
+    "play_media": { "service": "mdi:play-circle-outline" },
+    "say": { "service": "mdi:message-text-outline" }
+  }
+}

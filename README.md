@@ -128,6 +128,14 @@ The component will **auto‑discover** `intercom_handset_video` devices from you
 
 ---
 
+## 🗑️ Removing the integration
+
+1. Go to **Settings → Devices & Services**, open **Ring Intercom Video Camera**, and use the **⋮ menu → Delete**. This removes the camera entity and the config entry; your official Ring integration is untouched.
+2. (Optional) Remove the integration files via **HACS → Ring Intercom Video Camera → ⋮ → Remove**, then restart Home Assistant.
+3. If you ever used the legacy YAML setup, also delete the `ring_intercom_camera:` line from `configuration.yaml`.
+
+---
+
 ## 📋 Prerequisites
 
 - ✅ The official **[Ring](https://www.home-assistant.io/integrations/ring/)** integration must be configured and working in HA
@@ -319,6 +327,7 @@ The following features were designed and developed by **Andoni Sánchez ([@asanc
 | **v0.7.2** | 🔎 **Outgoing-audio diagnostics** | Adds DEBUG-level `[audio-diag]` logging on the outgoing-audio path — the **SDP offer** and Ring's **SDP answer** (negotiated audio codec/direction) and the **peak amplitude** of emitted frames (silence vs real audio) — to diagnose why server-sent talk-down may not play on the panel. Debug-gated only; no behaviour change at the default log level. |
 | **v0.7.3** | 🔊 **Outgoing-audio gain** | `say` / `play_media` gain a `gain` field (default **6×**, hard-clipped) that amplifies the outgoing audio — HA TTS arrives quiet at the panel (peaks measured ~10% of full scale), so it was often inaudible. Tune per call (`gain: 1` disables the boost). |
 | **v0.7.4** | 🗣️ **Talk-down speaker un-mute** | Server-side outgoing audio now actually **plays on the panel speaker**. The Ring device keeps the speaker in *stealth* (muted) mode by default; on `camera_connected` the session now sends `camera_options {stealth_mode: false}` to un-mute it (only when sending audio), mirroring ring-client-api's `activateCameraSpeaker` / python-ring-doorbell. Before this, audio RTP was sent and accepted (Opus `sendrecv`) but the speaker stayed muted, so nothing was heard. `activate_session` alone is liveness only, not speaker-enable. |
+| **v0.8.0** | 🧰 **Quality-scale hardening** | Adopts Home Assistant Gold-tier engineering standards (tracked in `quality_scale.yaml`): `has_entity_name` + `DeviceInfo` so the camera **groups under the existing Ring device** (same `entity_id`, same "… Camera" name), downloadable **diagnostics**, translatable service errors (`ServiceValidationError`), **entity / exception / icon** translations, `PARALLEL_UPDATES`, an `available` property tied to the Ring entry, typed `runtime_data`, `py.typed`, and **CI** (hassfest + HACS validation). No `entity_id` or service-name changes. |
 
 > These build on the original WebRTC live-stream camera and server-side snapshot work by **Kilian Ubeda Cano ([@cmos486](https://github.com/cmos486))**.
 

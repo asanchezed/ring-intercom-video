@@ -1,0 +1,110 @@
+# Integration Quality Scale tracking.
+#
+# NOTE: as a custom (HACS) integration the manifest quality_scale stays "custom";
+# this file tracks adherence to the official rules and is the basis for an
+# eventual core contribution. A genuine Gold/Platinum tier is only awarded to
+# core integrations — and this component cannot enter core as-is (it monkey-
+# patches python-ring-doorbell and reads the official `ring` integration's
+# runtime_data; that work must go upstream + into the `ring` integration).
+rules:
+  # --- Bronze ---
+  action-setup:
+    status: exempt
+    comment: Only entity services (record/play_media/say) are registered, via the camera platform; there are no entry-independent actions to register in async_setup.
+  appropriate-polling:
+    status: exempt
+    comment: No polling. Live view is browser-driven; snapshot/record are explicit.
+  brands:
+    status: todo
+    comment: Brand icons ship in the repo; a home-assistant/brands PR is pending.
+  common-modules: done
+  config-flow: done
+  config-flow-test-coverage:
+    status: todo
+    comment: No test suite yet.
+  dependency-transparency: done
+  docs-actions: done
+  docs-high-level-description: done
+  docs-installation-instructions: done
+  docs-removal-instructions: done
+  entity-event-setup:
+    status: exempt
+    comment: The camera subscribes to no external events.
+  entity-unique-id: done
+  has-entity-name: done
+  runtime-data: done
+  test-before-configure:
+    status: exempt
+    comment: The config flow takes no input and no credentials (auth is delegated to the ring integration), so there is no connection to test before configuring.
+  test-before-setup: done
+  unique-config-entry: done
+
+  # --- Silver ---
+  action-exceptions: done
+  config-entry-unloading: done
+  docs-configuration-parameters:
+    status: exempt
+    comment: No options flow / configurable parameters.
+  docs-installation-parameters:
+    status: exempt
+    comment: Setup is a single confirmation step with no parameters.
+  entity-unavailable: done
+  integration-owner: done
+  log-when-unavailable:
+    status: todo
+    comment: Availability is derived from the ring entry state; once/recover logging not yet added.
+  parallel-updates: done
+  reauthentication-flow:
+    status: exempt
+    comment: This integration holds no credentials; authentication is owned by the official ring integration.
+  test-coverage:
+    status: todo
+    comment: Above-95% coverage not yet reached.
+
+  # --- Gold ---
+  devices: done
+  diagnostics: done
+  discovery:
+    status: exempt
+    comment: Intercom devices are enumerated from the ring integration, not network-discovered.
+  discovery-update-info:
+    status: exempt
+    comment: No network discovery; connection details are owned by the ring integration.
+  docs-data-update: done
+  docs-examples: done
+  docs-known-limitations: done
+  docs-supported-devices: done
+  docs-supported-functions: done
+  docs-troubleshooting: done
+  docs-use-cases: done
+  dynamic-devices:
+    status: todo
+    comment: Intercoms are enumerated once at setup; device lifecycle is owned by the ring entry (a reason this belongs in the ring integration).
+  entity-category:
+    status: exempt
+    comment: The single camera entity has no config/diagnostic category.
+  entity-device-class:
+    status: exempt
+    comment: Camera entities have no device class.
+  entity-disabled-by-default:
+    status: exempt
+    comment: The camera is the integration's primary entity.
+  entity-translations: done
+  exception-translations: done
+  icon-translations: done
+  reconfiguration-flow:
+    status: exempt
+    comment: There are no settings to reconfigure (no options).
+  repair-issues: done
+  stale-devices:
+    status: exempt
+    comment: Device lifecycle is owned by the ring integration.
+
+  # --- Platinum ---
+  async-dependency: done
+  inject-websession:
+    status: exempt
+    comment: The integration reuses the ring integration's authenticated client/session rather than creating its own.
+  strict-typing:
+    status: todo
+    comment: py.typed shipped; full mypy --strict pass pending (device objects from the dependency are loosely typed).

@@ -13,6 +13,7 @@ Architecture:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 
 from homeassistant.config_entries import (
@@ -34,6 +35,22 @@ PLATFORMS = [Platform.CAMERA]
 RING_DOMAIN = "ring"
 
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
+
+
+@dataclass
+class RingIntercomData:
+    """Runtime data stored on the config entry.
+
+    This integration reuses the official Ring integration's auth and device
+    list, so there is little per-entry state; this holds the runtime markers
+    used by diagnostics.
+    """
+
+    patched: bool
+
+
+# Typed config entry (quality-scale `runtime-data` rule).
+RingIntercomConfigEntry = ConfigEntry[RingIntercomData]
 
 
 def _patch_ring_other() -> None:
@@ -114,10 +131,15 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 DOMAIN, context={"source": SOURCE_IMPORT}, data={}
             )
         )
+    else:
+        # YAML is gone (already imported) — clear the deprecation repair issue.
+        ir.async_delete_issue(hass, DOMAIN, "deprecated_yaml")
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_setup_entry(
+    hass: HomeAssistant, entry: RingIntercomConfigEntry
+) -> bool:
     """Set up Ring Intercom Video Camera from a config entry."""
     ring_entries = hass.config_entries.async_entries(RING_DOMAIN)
     if not ring_entries:
@@ -126,11 +148,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryNotReady("The Ring integration has not finished loading")
 
     _patch_ring_other()
+    entry.runtime_data = RingIntercomData(patched=True)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(
+    hass: HomeAssistant, entry: RingIntercomConfigEntry
+) -> bool:
     """Unload a config entry."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

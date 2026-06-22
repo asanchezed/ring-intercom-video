@@ -11,6 +11,27 @@
       "ring_not_configured": "The official Ring integration must be set up before adding this integration."
     }
   },
+  "entity": {
+    "camera": {
+      "intercom": {
+        "name": "Camera"
+      }
+    }
+  },
+  "exceptions": {
+    "path_not_allowed": {
+      "message": "Cannot write {filename}: no access to that path. Add it to allowlist_external_dirs."
+    },
+    "already_recording": {
+      "message": "{entity_id} is already recording."
+    },
+    "audio_session_active": {
+      "message": "{entity_id} already has an audio session in progress."
+    },
+    "no_audio_track": {
+      "message": "{media} has no audio track."
+    }
+  },
   "issues": {
     "deprecated_yaml": {
       "title": "Ring Intercom Video Camera YAML configuration is deprecated",

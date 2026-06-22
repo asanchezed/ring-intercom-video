@@ -43,8 +43,9 @@ from homeassistant.components.camera import (
 )
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, SupportsResponse, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv, entity_platform
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -58,6 +59,7 @@ from .const import (
     ATTR_MESSAGE,
     ATTR_OPTIONS,
     ATTR_TIMEOUT,
+    DOMAIN,
     SERVICE_PLAY_MEDIA,
     SERVICE_RECORD,
     SERVICE_SAY,
@@ -66,6 +68,11 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 RING_DOMAIN = "ring"
+
+# This camera has no polling (live view is browser-driven, snapshots/records are
+# explicit), so updates never need serializing. Declared explicitly per the
+# quality-scale `parallel-updates` rule.
+PARALLEL_UPDATES = 0
 
 # Server-side snapshot capture settings
 SNAPSHOT_MAX_FRAMES = 75         # Max frames to examine (~3s at 25fps)
@@ -175,7 +182,11 @@ def _get_injector_class():
             player = await self._hass.async_add_executor_job(MediaPlayer, media)
             if player.audio is None:
                 await self._hass.async_add_executor_job(self._stop_player, player)
-                raise HomeAssistantError(f"{media} has no audio track")
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN,
+                    translation_key="no_audio_track",
+                    translation_placeholders={"media": media},
+                )
             async with self._play_lock:
                 self._stop_source()
                 self._player = player
@@ -429,15 +440,23 @@ async def async_setup_entry(
 class RingIntercomCamera(Camera):
     """WebRTC live-stream camera + server-side snapshot for Ring Intercom Video."""
 
+    _attr_has_entity_name = True
+    _attr_translation_key = "intercom"
+
     def __init__(self, device) -> None:
         """Initialize the camera."""
         super().__init__()
         self._device = device
-        self._attr_name = f"{device.name} Camera"
         self._attr_unique_id = f"ring_intercom_camera_{device.device_api_id}"
-        self._attr_brand = "Ring"
-        self._attr_model = "Intercom Video"
         self._attr_supported_features = CameraEntityFeature.STREAM
+        # Attach to the EXISTING Ring device so the camera groups under it
+        # instead of floating. The official ring integration registers the
+        # device with identifiers={(DOMAIN, device.device_id)} (raw, the mac),
+        # so we MUST use the exact same value — using device_api_id or wrapping
+        # in str() would create a separate empty device and rename the entity.
+        self._attr_device_info = DeviceInfo(
+            identifiers={(RING_DOMAIN, device.device_id)},
+        )
 
         # Snapshot cache
         self._last_image: bytes | None = None
@@ -453,6 +472,14 @@ class RingIntercomCamera(Camera):
         # of opening a second one (the device allows only one live view).
         self._audio_injector: Any | None = None
         self._audio_lock = asyncio.Lock()
+
+    @property
+    def available(self) -> bool:
+        """Available only while the Ring integration (auth/devices) is loaded."""
+        return any(
+            entry.state is ConfigEntryState.LOADED
+            for entry in self.hass.config_entries.async_entries(RING_DOMAIN)
+        )
 
     @property
     def is_recording(self) -> bool:
@@ -894,15 +921,22 @@ class RingIntercomCamera(Camera):
         anything to the intercom (no silence on the line).
         """
         if not self.hass.config.is_allowed_path(filename):
-            raise HomeAssistantError(
-                f"Cannot write {filename}, no access to path; "
-                "add it to allowlist_external_dirs"
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="path_not_allowed",
+                translation_placeholders={"filename": filename},
             )
         if self._recording:
-            raise HomeAssistantError(f"{self.entity_id} is already recording")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="already_recording",
+                translation_placeholders={"entity_id": self.entity_id},
+            )
         if self._audio_injector is not None:
-            raise HomeAssistantError(
-                f"{self.entity_id} has an audio session in progress"
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="audio_session_active",
+                translation_placeholders={"entity_id": self.entity_id},
             )
 
         try:
