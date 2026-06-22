@@ -2,11 +2,13 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
-[![GitHub release](https://img.shields.io/github/v/release/cmos486/ring-intercom-video)](https://github.com/cmos486/ring-intercom-video/releases)
+[![GitHub release](https://img.shields.io/github/v/release/asanchezed/ring-intercom-video)](https://github.com/asanchezed/ring-intercom-video/releases)
 
 > 🏠 Home Assistant custom integration that adds a **WebRTC live-stream camera** for the **Ring Intercom Handset Video** (2024/2025 model with built-in camera).
 
 The official Ring integration only exposes lock and ding entities for intercoms. This component adds the missing **camera entity with native WebRTC live view** — the same streaming technology Ring uses for its doorbell cameras.
+
+> 🍴 **This is a maintained fork** of the original [`cmos486/ring-intercom-video`](https://github.com/cmos486/ring-intercom-video) by Kilian Ubeda Cano. Active development continues here at **[`asanchezed/ring-intercom-video`](https://github.com/asanchezed/ring-intercom-video)** — install from and report issues against **this** repo.
 
 ---
 
@@ -16,7 +18,7 @@ This repository is the **backend integration**. There is a companion **Lovelace 
 
 | Piece | Repo | What it does |
 |---|---|---|
-| 🛰️ **Integration (this repo)** | [`ring-intercom-video`](https://github.com/cmos486/ring-intercom-video) | Creates the `camera.*` entity and bridges WebRTC signaling between HA and Ring |
+| 🛰️ **Integration (this repo)** | [`ring-intercom-video`](https://github.com/asanchezed/ring-intercom-video) | Creates the `camera.*` entity and bridges WebRTC signaling between HA and Ring |
 | 🎛️ **Lovelace card** | [`ring-intercom-video-card`](https://github.com/cmos486/ring-intercom-video-card) | UI with two‑way audio, pick‑up / hang‑up and open‑door buttons |
 
 You can use this integration on its own (you'll get a working camera entity), but the card is what turns it into a real intercom on your dashboards or wallpanels.
@@ -102,7 +104,7 @@ When the camera is not active, the stream shows a **black image**. This is norma
 
 1. Open **HACS** in Home Assistant
 2. Go to **Integrations** → click the **⋮ menu** (top right) → **Custom repositories**
-3. Add this URL: `https://github.com/cmos486/ring-intercom-video`
+3. Add this URL: `https://github.com/asanchezed/ring-intercom-video`
 4. Category: **Integration**
 5. Click **Add**, then search for *"Ring Intercom Video Camera"* and download it
 6. **Restart** Home Assistant
@@ -328,6 +330,7 @@ The following features were designed and developed by **Andoni Sánchez ([@asanc
 | **v0.7.3** | 🔊 **Outgoing-audio gain** | `say` / `play_media` gain a `gain` field (default **6×**, hard-clipped) that amplifies the outgoing audio — HA TTS arrives quiet at the panel (peaks measured ~10% of full scale), so it was often inaudible. Tune per call (`gain: 1` disables the boost). |
 | **v0.7.4** | 🗣️ **Talk-down speaker un-mute** | Server-side outgoing audio now actually **plays on the panel speaker**. The Ring device keeps the speaker in *stealth* (muted) mode by default; on `camera_connected` the session now sends `camera_options {stealth_mode: false}` to un-mute it (only when sending audio), mirroring ring-client-api's `activateCameraSpeaker` / python-ring-doorbell. Before this, audio RTP was sent and accepted (Opus `sendrecv`) but the speaker stayed muted, so nothing was heard. `activate_session` alone is liveness only, not speaker-enable. |
 | **v0.8.0** | 🧰 **Quality-scale hardening** | Adopts Home Assistant Gold-tier engineering standards (tracked in `quality_scale.yaml`): `has_entity_name` + `DeviceInfo` so the camera **groups under the existing Ring device** (same `entity_id`, same "… Camera" name), downloadable **diagnostics**, translatable service errors (`ServiceValidationError`), **entity / exception / icon** translations, `PARALLEL_UPDATES`, an `available` property tied to the Ring entry, typed `runtime_data`, `py.typed`, and **CI** (hassfest + HACS validation). No `entity_id` or service-name changes. |
+| **v0.8.1** | 🔗 **Repo links point to this fork** | README badge, HACS install URL and the integration links — plus the manifest's `documentation` / `issue_tracker` (HA's *Documentation* and *Report an issue* buttons) — now point to **`asanchezed/ring-intercom-video`** instead of the upstream they were forked from. Adds a fork note crediting the original. Docs/metadata only — no code changes. |
 
 > These build on the original WebRTC live-stream camera and server-side snapshot work by **Kilian Ubeda Cano ([@cmos486](https://github.com/cmos486))**.
 

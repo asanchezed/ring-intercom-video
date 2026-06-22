@@ -4,13 +4,13 @@
   "codeowners": ["@cmos486", "@asanchezed"],
   "config_flow": true,
   "dependencies": ["ring"],
-  "documentation": "https://github.com/cmos486/ring-intercom-video",
+  "documentation": "https://github.com/asanchezed/ring-intercom-video",
   "integration_type": "device",
   "iot_class": "cloud_push",
-  "issue_tracker": "https://github.com/cmos486/ring-intercom-video/issues",
+  "issue_tracker": "https://github.com/asanchezed/ring-intercom-video/issues",
   "loggers": ["ring_doorbell", "aiortc"],
   "quality_scale": "custom",
   "requirements": ["aiortc>=1.9.0", "Pillow>=10.0.0", "websockets>=12.0"],
   "single_config_entry": true,
-  "version": "0.8.0"
+  "version": "0.8.1"
 }
