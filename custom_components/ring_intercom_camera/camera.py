@@ -564,8 +564,11 @@ class RingIntercomCamera(Camera):
             from aiortc import RTCPeerConnection
         except ImportError:
             _LOGGER.error(
-                "aiortc not available — snapshot capture requires aiortc. "
-                "It should be installed automatically via requirements."
+                "aiortc not available — snapshot capture is disabled. Live view "
+                "still works without it. Snapshot/record/two-way audio need "
+                "aiortc, which is now optional because Home Assistant pins an "
+                "'av' version that has no compatible aiortc release yet "
+                "(see the integration README)."
             )
             return None
 
@@ -944,8 +947,9 @@ class RingIntercomCamera(Camera):
             from aiortc.contrib.media import MediaRecorder, MediaRelay
         except ImportError as err:
             raise HomeAssistantError(
-                "aiortc not available — recording requires aiortc. "
-                "It should be installed automatically via requirements."
+                "aiortc not available — recording requires aiortc, which is now "
+                "optional because Home Assistant pins an 'av' version that has "
+                "no compatible aiortc release yet (see the integration README)."
             ) from err
 
         await self.hass.async_add_executor_job(
@@ -1135,7 +1139,9 @@ class RingIntercomCamera(Camera):
             from aiortc import RTCPeerConnection
         except ImportError as err:
             raise HomeAssistantError(
-                "aiortc not available — audio playback requires aiortc."
+                "aiortc not available — audio playback requires aiortc, which is "
+                "now optional because Home Assistant pins an 'av' version that has "
+                "no compatible aiortc release yet (see the integration README)."
             ) from err
 
         injector = _get_injector_class()(self.hass)

@@ -311,6 +311,13 @@ Both `say` and `play_media` return a response so automations can tell whether th
   - **`SDP ANSWER`** — the audio codec and direction Ring negotiated (confirms Ring is accepting outgoing audio).
   - **`out frame #N peak=…`** — `peak` well above `0` means real audio is being emitted; `peak=0` would mean silence (a local pipeline bug).
 
+**❓ `Setup failed … Requirements for ring_intercom_camera not found: ['aiortc>=1.9.0']`**
+- As of **v0.8.2**, `aiortc` is **no longer a hard requirement**, so this no longer blocks setup — the camera and **live view load normally without it**. Update the integration to v0.8.2+.
+- Root cause: Home Assistant **2026.7** pins `av==17.0.1`, and no released `aiortc` supports `av>=17` yet (the latest, `aiortc 1.14.0`, requires `av<17`). HA's core `av` pin overrides any integration requirement, so `aiortc` simply cannot be installed on 2026.7 — pip finds no compatible version.
+- Consequence: the **optional server-side features** — snapshot (`camera.snapshot` / `async_camera_image`), `record`, and outgoing audio (`say` / `play_media`) — are **temporarily unavailable** until `aiortc` publishes an `av>=17`-compatible release. When invoked, they log a clear "aiortc not available" message instead of crashing.
+- Everything else (live WebRTC view, two-way audio in the browser via the companion card, locks/dings from the official Ring integration) is unaffected.
+- Want them back sooner? You can install `aiortc` manually inside the HA container (`pip install aiortc`), but it will conflict with HA's pinned `av==17.0.1`, so this is unsupported until upstream `aiortc` catches up.
+
 ---
 
 ## 🚀 Improvements in this fork
@@ -331,6 +338,7 @@ The following features were designed and developed by **Andoni Sánchez ([@asanc
 | **v0.7.4** | 🗣️ **Talk-down speaker un-mute** | Server-side outgoing audio now actually **plays on the panel speaker**. The Ring device keeps the speaker in *stealth* (muted) mode by default; on `camera_connected` the session now sends `camera_options {stealth_mode: false}` to un-mute it (only when sending audio), mirroring ring-client-api's `activateCameraSpeaker` / python-ring-doorbell. Before this, audio RTP was sent and accepted (Opus `sendrecv`) but the speaker stayed muted, so nothing was heard. `activate_session` alone is liveness only, not speaker-enable. |
 | **v0.8.0** | 🧰 **Quality-scale hardening** | Adopts Home Assistant Gold-tier engineering standards (tracked in `quality_scale.yaml`): `has_entity_name` + `DeviceInfo` so the camera **groups under the existing Ring device** (same `entity_id`, same "… Camera" name), downloadable **diagnostics**, translatable service errors (`ServiceValidationError`), **entity / exception / icon** translations, `PARALLEL_UPDATES`, an `available` property tied to the Ring entry, typed `runtime_data`, `py.typed`, and **CI** (hassfest + HACS validation). No `entity_id` or service-name changes. |
 | **v0.8.1** | 🔗 **Repo links point to this fork** | README badge, HACS install URL and the integration links — plus the manifest's `documentation` / `issue_tracker` (HA's *Documentation* and *Report an issue* buttons) — now point to **`asanchezed/ring-intercom-video`** instead of the upstream they were forked from. Adds a fork note crediting the original. Docs/metadata only — no code changes. |
+| **v0.8.2** | 🩹 **`aiortc` no longer a hard requirement (HA 2026.7 fix)** | HA **2026.7** pins `av==17.0.1`, which **no released `aiortc` supports yet** (latest `1.14.0` needs `av<17`), so `aiortc>=1.9.0` couldn't be installed and the whole integration failed to set up (`Requirements … not found: ['aiortc>=1.9.0']`). `aiortc` is now **optional**: live view — which never needed it — always loads. Snapshot/`record`/`say`/`play_media` degrade gracefully with a clear log message until upstream `aiortc` ships an `av>=17`-compatible release. |
 
 > These build on the original WebRTC live-stream camera and server-side snapshot work by **Kilian Ubeda Cano ([@cmos486](https://github.com/cmos486))**.
 
