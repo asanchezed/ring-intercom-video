@@ -41,7 +41,7 @@
   "services": {
     "record": {
       "name": "Record clip",
-      "description": "Records a video clip from the intercom camera through a server-side WebRTC session and saves it as an MP4 file. Use this instead of camera.record, which requires an RTSP/HLS stream this camera doesn't have.",
+      "description": "Records a clip from the intercom camera through a server-side WebRTC session and saves it as an MP4 file — video plus, by default, the intercom's incoming audio. Use this instead of camera.record, which requires an RTSP/HLS stream this camera doesn't have.",
       "fields": {
         "filename": {
           "name": "Filename",
@@ -52,8 +52,12 @@
           "description": "Length of the recording in seconds."
         },
         "enable_audio": {
-          "name": "Enable audio",
+          "name": "Enable outgoing audio",
           "description": "Negotiate an outgoing audio channel so say/play_media can send audio to the intercom while this recording runs. Off by default (no audio is sent to the device)."
+        },
+        "record_audio": {
+          "name": "Record incoming audio",
+          "description": "Also record the intercom's incoming audio (the street-panel microphone) into the MP4. On by default; turn off for a video-only clip. Independent of 'Enable outgoing audio' — recording the mic never sends anything to the device."
         }
       }
     },

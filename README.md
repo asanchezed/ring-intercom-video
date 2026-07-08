@@ -183,14 +183,15 @@ This component:
 
 ### `ring_intercom_camera.record`
 
-Records a video clip server-side (no browser needed) and saves it as an MP4 file. The standard `camera.record` service **does not work** with this camera — it requires an RTSP/HLS `stream_source`, and this camera is WebRTC-only. This service opens the same server-side WebRTC session used for snapshots and writes the video track to disk with `aiortc`'s `MediaRecorder`.
+Records a clip server-side (no browser needed) and saves it as an MP4 file — the video track plus, **by default, the intercom's incoming audio** (the street-panel microphone, transcoded Opus → AAC), so the clip captures what the visitor says. The standard `camera.record` service **does not work** with this camera — it requires an RTSP/HLS `stream_source`, and this camera is WebRTC-only. This service opens the same server-side WebRTC session used for snapshots and writes the tracks to disk with `aiortc`'s `MediaRecorder`.
 
 | Field | Required | Default | Description |
 |---|---|---|---|
 | `entity_id` (target) | ✅ | — | The intercom camera entity |
 | `filename` | ✅ | — | Full path of the output MP4. Must be in an allowed path (e.g. under `/media`) |
 | `duration` | ❌ | `20` | Clip length in seconds (1–300) |
-| `enable_audio` | ❌ | `false` | Negotiate an **outgoing** audio channel so `say` / `play_media` can talk to the intercom **while this recording runs**. Off by default — a plain receive-only recording that sends nothing to the device. |
+| `enable_audio` | ❌ | `false` | Negotiate an **outgoing** audio channel so `say` / `play_media` can talk to the intercom **while this recording runs**. Off by default — a recording that sends nothing to the device. |
+| `record_audio` | ❌ | `true` | Record the **incoming** audio (street-panel mic) into the MP4. Turn off for a video-only clip. Independent of `enable_audio` — the two are opposite directions of the same audio m-line, so recording the mic never sends anything to the device (the panel speaker stays muted unless `say`/`play_media` un-mutes it), and it never interferes with talk-down. If Ring doesn't deliver an audio track, the clip is saved video-only and a warning is logged. |
 
 ```yaml
 # Example: record 20 s when someone rings
@@ -339,6 +340,7 @@ The following features were designed and developed by **Andoni Sánchez ([@asanc
 | **v0.8.0** | 🧰 **Quality-scale hardening** | Adopts Home Assistant Gold-tier engineering standards (tracked in `quality_scale.yaml`): `has_entity_name` + `DeviceInfo` so the camera **groups under the existing Ring device** (same `entity_id`, same "… Camera" name), downloadable **diagnostics**, translatable service errors (`ServiceValidationError`), **entity / exception / icon** translations, `PARALLEL_UPDATES`, an `available` property tied to the Ring entry, typed `runtime_data`, `py.typed`, and **CI** (hassfest + HACS validation). No `entity_id` or service-name changes. |
 | **v0.8.1** | 🔗 **Repo links point to this fork** | README badge, HACS install URL and the integration links — plus the manifest's `documentation` / `issue_tracker` (HA's *Documentation* and *Report an issue* buttons) — now point to **`asanchezed/ring-intercom-video`** instead of the upstream they were forked from. Adds a fork note crediting the original. Docs/metadata only — no code changes. |
 | **v0.8.2** | 🩹 **`aiortc` no longer a hard requirement (HA 2026.7 fix)** | HA **2026.7** pins `av==17.0.1`, which **no released `aiortc` supports yet** (latest `1.14.0` needs `av<17`), so `aiortc>=1.9.0` couldn't be installed and the whole integration failed to set up (`Requirements … not found: ['aiortc>=1.9.0']`). `aiortc` is now **optional**: live view — which never needed it — always loads. Snapshot/`record`/`say`/`play_media` degrade gracefully with a clear log message until upstream `aiortc` ships an `av>=17`-compatible release. |
+| **v0.9.0** | 🎙️ **Record incoming audio** | `record` now writes the intercom's **incoming audio** (the street-panel microphone, transcoded Opus → AAC) into the MP4 alongside the video, so a clip captures what the visitor says. Controlled by a new `record_audio` field, **on by default**; set it `false` for a video-only clip. It is the receive-side counterpart of `enable_audio` (send/talk-down) — the two are independent directions of the same audio m-line, so recording the mic never un-mutes the panel speaker and never interferes with `say`/`play_media`. If Ring doesn't deliver an audio track, the clip is saved video-only with a warning. |
 
 > These build on the original WebRTC live-stream camera and server-side snapshot work by **Kilian Ubeda Cano ([@cmos486](https://github.com/cmos486))**.
 

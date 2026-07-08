@@ -23,6 +23,11 @@ record:
       default: false
       selector:
         boolean:
+    record_audio:
+      required: false
+      default: true
+      selector:
+        boolean:
 
 play_media:
   target:

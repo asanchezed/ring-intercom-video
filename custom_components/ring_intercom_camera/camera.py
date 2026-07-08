@@ -11,10 +11,11 @@ Three modes of operation:
    Works from automations without needing a browser open.
 
 3. RECORD (server-side WebRTC) — ring_intercom_camera.record service
-   opens a server-side WebRTC connection and writes the video track
-   to an MP4 file for the requested duration. The standard
-   camera.record service can't be used: it requires an RTSP/HLS
-   stream_source, which a WebRTC-only camera doesn't have.
+   opens a server-side WebRTC connection and writes the video track —
+   and, by default, the intercom's incoming audio (street-panel mic)
+   as an AAC track — to an MP4 file for the requested duration. The
+   standard camera.record service can't be used: it requires an
+   RTSP/HLS stream_source, which a WebRTC-only camera doesn't have.
 """
 
 from __future__ import annotations
@@ -58,6 +59,7 @@ from .const import (
     ATTR_MEDIA,
     ATTR_MESSAGE,
     ATTR_OPTIONS,
+    ATTR_RECORD_AUDIO,
     ATTR_TIMEOUT,
     DOMAIN,
     SERVICE_PLAY_MEDIA,
@@ -370,6 +372,7 @@ async def async_setup_entry(
                 vol.Coerce(int), vol.Range(min=1, max=RECORD_MAX_DURATION)
             ),
             vol.Optional(ATTR_ENABLE_AUDIO, default=False): cv.boolean,
+            vol.Optional(ATTR_RECORD_AUDIO, default=True): cv.boolean,
         },
         "async_record_clip",
     )
@@ -696,6 +699,7 @@ class RingIntercomCamera(Camera):
         max_seconds: float,
         recv_timeout: float = 3,
         audio_out_track=None,
+        receive_audio: bool = False,
     ) -> None:
         """Drive a server-side WebRTC session over Ring signaling.
 
@@ -716,6 +720,16 @@ class RingIntercomCamera(Camera):
         offer/answer time and Ring expects audio in the initial offer (it does
         not renegotiate mid-session). When omitted, the session is receive-only
         (snapshot/record behaviour, unchanged).
+
+        ``receive_audio``: set ``stream_options.audio_enabled`` even without an
+        outgoing track, so Ring includes the intercom's mic audio in the
+        stream (needed to record incoming audio). The audio m-line is already
+        negotiated in every offer (recvonly here, or sendrecv via
+        ``audio_out_track``); this only affects the stream_options flag. It
+        does NOT un-mute the panel speaker — that requires the separate
+        ``camera_options{stealth_mode: false}`` message, which is only sent
+        when ``audio_out_track`` is present, so receiving/recording the mic
+        never makes the device play anything.
         """
         session_start = time.time()
         from aiortc import RTCSessionDescription
@@ -788,7 +802,9 @@ class RingIntercomCamera(Camera):
                     "body": {
                         "doorbot_id": self._device.device_api_id,
                         "stream_options": {
-                            "audio_enabled": audio_out_track is not None,
+                            "audio_enabled": (
+                                audio_out_track is not None or receive_audio
+                            ),
                             "video_enabled": True,
                         },
                         "sdp": pc.localDescription.sdp,
@@ -913,15 +929,31 @@ class RingIntercomCamera(Camera):
     # ---- Record (server-side WebRTC capture to MP4) ----
 
     async def async_record_clip(
-        self, filename: str, duration: int, enable_audio: bool = False
+        self,
+        filename: str,
+        duration: int,
+        enable_audio: bool = False,
+        record_audio: bool = True,
     ) -> None:
         """Record a video clip (ring_intercom_camera.record service).
+
+        When ``record_audio`` is True (the default) the intercom's INCOMING
+        audio — the street-panel microphone — is written into the MP4 as an
+        AAC track alongside the video, so the clip captures what the visitor
+        says. Set it to False for a video-only clip (the previous behaviour).
 
         When ``enable_audio`` is True the session is negotiated audio-capable
         (an outgoing audio track is added from the start), so ``say``/
         ``play_media`` can inject audio into this same session while it records.
         It defaults to False: a plain receive-only recording that never sends
         anything to the intercom (no silence on the line).
+
+        The two flags are independent directions of the same audio m-line:
+        ``record_audio`` consumes what Ring sends (mic), ``enable_audio`` adds
+        what we send (speaker). Recording the mic never interferes with
+        talk-down — the outgoing injector track is not touched — and any TTS
+        played on the panel will simply show up in the clip through the
+        panel's own microphone.
         """
         if not self.hass.config.is_allowed_path(filename):
             raise ServiceValidationError(
@@ -965,11 +997,34 @@ class RingIntercomCamera(Camera):
         # them from each other
         relay = MediaRelay()
         record_done = asyncio.Event()
-        recording = {"started": False}
+        recording = {"started": False, "audio_added": False}
         cache_feed: dict[str, asyncio.Task | None] = {"task": None}
 
         @pc.on("track")
         async def on_track(track):
+            if track.kind == "audio":
+                if not record_audio or recording["audio_added"]:
+                    return
+                # Both track events fire synchronously during
+                # setRemoteDescription — seconds before ICE/DTLS complete and
+                # the first frame is muxed (which is what writes the MP4
+                # header) — so adding the audio stream here is safe even when
+                # the video handler has already started the recorder;
+                # recorder.start() is incremental (it only spawns encoder
+                # tasks for tracks that don't have one yet).
+                try:
+                    recorder.addTrack(track)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "%s: could not add the incoming audio track to the "
+                        "recording; clip continues video-only",
+                        self.entity_id, exc_info=True,
+                    )
+                    return
+                recording["audio_added"] = True
+                if recording["started"]:
+                    await recorder.start()
+                return
             if track.kind != "video" or recording["started"]:
                 return
             recording["started"] = True
@@ -993,6 +1048,7 @@ class RingIntercomCamera(Camera):
                 done=record_done,
                 max_seconds=duration + RECORD_SETUP_MARGIN,
                 audio_out_track=injector,
+                receive_audio=record_audio,
             )
         finally:
             self._recording = False
@@ -1013,8 +1069,15 @@ class RingIntercomCamera(Camera):
                 f"No video received from {self.entity_id}; clip not saved"
             )
 
+        if record_audio and not recording["audio_added"]:
+            _LOGGER.warning(
+                "%s: Ring did not negotiate an incoming audio track — clip "
+                "saved without audio", self.entity_id,
+            )
         _LOGGER.info(
-            "Saved %d s clip from %s to %s", duration, self.entity_id, filename
+            "Saved %d s clip from %s to %s%s",
+            duration, self.entity_id, filename,
+            " (with intercom audio)" if recording["audio_added"] else "",
         )
 
     # ---- Outgoing audio (server-side WebRTC TTS / media playback) ----
