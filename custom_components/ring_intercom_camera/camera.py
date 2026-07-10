@@ -331,6 +331,91 @@ def _get_injector_class():
     return _INJECTOR_CLASS
 
 
+# Built lazily for the same reason as the injector (keep aiortc out of the
+# live-view import path). Cached after first use.
+_SYNC_CLASSES = None
+
+
+def _get_sync_track_classes():
+    """Return ``(FirstVideoFrameSignal, AVSyncAudioTrack)`` for A/V alignment.
+
+    Ring's analog camera needs ~1-3 s to warm up, but the street-panel
+    microphone streams audio immediately. aiortc normalizes each remote
+    track's PTS independently (first frame of each → PTS 0), so the leading
+    seconds of audio end up with no matching video and, once muxed, the
+    picture appears to lag the sound. These wrappers realign the two:
+
+    - ``FirstVideoFrameSignal`` — a pass-through video track that sets an
+      Event the instant the first video frame is decoded.
+    - ``AVSyncAudioTrack`` — drops every audio frame that arrives before that
+      event, then re-stamps the kept audio onto a fresh contiguous per-sample
+      timeline starting at 0, so it lines up with the video (whose own first
+      frame is already PTS 0). The dropped amount is measured per session, so
+      this self-adapts to a variable warm-up instead of assuming a fixed lag.
+    """
+    global _SYNC_CLASSES
+    if _SYNC_CLASSES is not None:
+        return _SYNC_CLASSES
+
+    from aiortc import MediaStreamTrack
+
+    class FirstVideoFrameSignal(MediaStreamTrack):
+        """Pass-through video track that flags the arrival of its first frame."""
+
+        kind = "video"
+
+        def __init__(self, source, started) -> None:
+            super().__init__()
+            self._source = source
+            self._started = started
+
+        async def recv(self):
+            frame = await self._source.recv()
+            if not self._started.is_set():
+                self._started.set()
+            return frame
+
+    class AVSyncAudioTrack(MediaStreamTrack):
+        """Incoming-audio track that begins at the first video frame.
+
+        Drops audio that precedes the video warm-up, then re-stamps PTS onto a
+        fresh contiguous timeline so the recorded audio aligns with the
+        picture. Source exhaustion (``MediaStreamError``) propagates unchanged
+        so the recorder's encoder task ends normally.
+        """
+
+        kind = "audio"
+
+        def __init__(self, source, video_started) -> None:
+            super().__init__()
+            self._source = source
+            self._video_started = video_started
+            self._pts = 0
+            self._dropped = 0
+
+        async def recv(self):
+            while True:
+                frame = await self._source.recv()
+                if self._video_started.is_set():
+                    break
+                self._dropped += 1
+            if self._pts == 0 and self._dropped:
+                _LOGGER.debug(
+                    "[av-sync] dropped %d pre-video audio frame(s) (~%.1f s) "
+                    "to align audio with the first video frame",
+                    self._dropped,
+                    self._dropped * frame.samples / (frame.sample_rate or 48000),
+                )
+            frame.pts = self._pts
+            self._pts += frame.samples
+            if frame.sample_rate:
+                frame.time_base = fractions.Fraction(1, frame.sample_rate)
+            return frame
+
+    _SYNC_CLASSES = (FirstVideoFrameSignal, AVSyncAudioTrack)
+    return _SYNC_CLASSES
+
+
 def _remove_quietly(path: str) -> None:
     """Remove a file, ignoring errors (e.g. it was never created)."""
     try:
@@ -941,6 +1026,9 @@ class RingIntercomCamera(Camera):
         audio — the street-panel microphone — is written into the MP4 as an
         AAC track alongside the video, so the clip captures what the visitor
         says. Set it to False for a video-only clip (the previous behaviour).
+        The audio is aligned to the first video frame (dropping the audio that
+        precedes the camera's warm-up), so the picture doesn't lag the sound —
+        see :func:`_get_sync_track_classes`.
 
         When ``enable_audio`` is True the session is negotiated audio-capable
         (an outgoing audio track is added from the start), so ``say``/
@@ -999,6 +1087,14 @@ class RingIntercomCamera(Camera):
         record_done = asyncio.Event()
         recording = {"started": False, "audio_added": False}
         cache_feed: dict[str, asyncio.Task | None] = {"task": None}
+        # A/V sync: the analog camera warms up after audio is already flowing,
+        # so align the recorded audio to the first video frame (see
+        # _get_sync_track_classes). Only wired in when recording audio.
+        video_started = asyncio.Event()
+        if record_audio:
+            _FirstVideoSignal, _SyncAudio = _get_sync_track_classes()
+        else:
+            _FirstVideoSignal = _SyncAudio = None
 
         @pc.on("track")
         async def on_track(track):
@@ -1013,7 +1109,9 @@ class RingIntercomCamera(Camera):
                 # recorder.start() is incremental (it only spawns encoder
                 # tasks for tracks that don't have one yet).
                 try:
-                    recorder.addTrack(track)
+                    # Wrap so the recorded audio starts at the first video
+                    # frame (drops the pre-warm-up lead, re-stamps PTS).
+                    recorder.addTrack(_SyncAudio(track, video_started))
                 except Exception:  # noqa: BLE001
                     _LOGGER.warning(
                         "%s: could not add the incoming audio track to the "
@@ -1028,7 +1126,13 @@ class RingIntercomCamera(Camera):
             if track.kind != "video" or recording["started"]:
                 return
             recording["started"] = True
-            recorder.addTrack(relay.subscribe(track))
+            video_for_recorder = relay.subscribe(track)
+            if _FirstVideoSignal is not None:
+                # Signal the audio wrapper the moment real video begins.
+                video_for_recorder = _FirstVideoSignal(
+                    video_for_recorder, video_started
+                )
+            recorder.addTrack(video_for_recorder)
             await recorder.start()
             cache_feed["task"] = asyncio.create_task(
                 self._feed_snapshot_cache(relay.subscribe(track))
