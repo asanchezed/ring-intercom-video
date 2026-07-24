@@ -416,6 +416,62 @@ def _get_sync_track_classes():
     return _SYNC_CLASSES
 
 
+# Built lazily for the same reason as the injector / sync classes (keep aiortc
+# out of the live-view import path). Cached after first use.
+_VIDEO_GUARD_CLASS = None
+
+
+def _get_video_guard_class():
+    """Return a pass-through video track that keeps PTS strictly increasing.
+
+    Ring's WebRTC feed occasionally emits a frame whose timestamp does not
+    advance — jitter, an RTP retransmission, or a repeated key-frame. aiortc's
+    ``MediaRecorder`` re-encodes each frame in arrival order, so a stalled PTS
+    becomes a **duplicate DTS** at the MP4 muxer. libav rejects that on flush
+    (``non monotonically increasing dts to muxer``), which aborts
+    ``recorder.stop()`` and leaves the clip **unfinalized** (no ``moov`` atom →
+    unplayable, and no ``folder_watcher`` close event → no notification).
+
+    Nudging any non-advancing PTS forward by a single tick keeps the muxer
+    happy without dropping the frame or reordering anything — one tick
+    (~11 µs at video's 90 kHz clock) is imperceptible and preserves A/V sync.
+    """
+    global _VIDEO_GUARD_CLASS
+    if _VIDEO_GUARD_CLASS is not None:
+        return _VIDEO_GUARD_CLASS
+
+    from aiortc import MediaStreamTrack
+
+    class MonotonicVideoTrack(MediaStreamTrack):
+        """Pass-through video track that forces strictly increasing PTS."""
+
+        kind = "video"
+
+        def __init__(self, source) -> None:
+            super().__init__()
+            self._source = source
+            self._last_pts = None
+            self._fixups = 0
+
+        async def recv(self):
+            frame = await self._source.recv()
+            if frame.pts is not None:
+                if self._last_pts is not None and frame.pts <= self._last_pts:
+                    if not self._fixups:
+                        _LOGGER.debug(
+                            "[mux-guard] video PTS stalled at %s (<= previous "
+                            "%s); nudging forward to keep the MP4 muxer's DTS "
+                            "monotonic", frame.pts, self._last_pts,
+                        )
+                    frame.pts = self._last_pts + 1
+                    self._fixups += 1
+                self._last_pts = frame.pts
+            return frame
+
+    _VIDEO_GUARD_CLASS = MonotonicVideoTrack
+    return _VIDEO_GUARD_CLASS
+
+
 def _remove_quietly(path: str) -> None:
     """Remove a file, ignoring errors (e.g. it was never created)."""
     try:
@@ -1127,6 +1183,11 @@ class RingIntercomCamera(Camera):
                 return
             recording["started"] = True
             video_for_recorder = relay.subscribe(track)
+            # Guarantee strictly increasing PTS so a stalled/duplicate frame
+            # timestamp from the WebRTC feed can't become a duplicate DTS that
+            # the MP4 muxer rejects at flush (which would leave the clip
+            # unfinalized). Applied in every mode, before the A/V-sync signal.
+            video_for_recorder = _get_video_guard_class()(video_for_recorder)
             if _FirstVideoSignal is not None:
                 # Signal the audio wrapper the moment real video begins.
                 video_for_recorder = _FirstVideoSignal(
